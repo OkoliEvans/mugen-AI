@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+artifacts/pk.key
+artifacts/*.compiled
+/target
+node_modules
+.venv-aggr
+.env

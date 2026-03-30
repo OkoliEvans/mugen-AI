@@ -1,0 +1,33 @@
+[package]
+name    = "gateway"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "gateway"
+path = "src/main.rs"
+
+[dependencies]
+prover-manager = { path = "../prover-manager" }
+settler        = { path = "../settler" }
+common         = { path = "../common" }
+ipfs           = { path = "../ipfs" }
+
+hex                = "0.4"
+actix-web          = "4"
+alloy        = { version = "1", features = ["full"] }
+tokio              = { version = "1", features = ["full"] }
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+uuid               = { version = "1", features = ["v4", "serde"] }
+chrono             = { version = "0.4", features = ["serde"] }
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+thiserror          = "1"
+anyhow             = "1"
+dotenvy            = "0.15"
+sha2               = "0.10"
+hex-literal        = "0.4"
+base64  = "0.22"
+bytes   = "1"
+

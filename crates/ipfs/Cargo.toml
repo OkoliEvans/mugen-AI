@@ -1,0 +1,18 @@
+[package]
+name    = "ipfs"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pin_model"
+path = "src/bin/pin_model.rs"
+
+[dependencies]
+reqwest  = { version = "0.12", features = ["json", "multipart"] }
+serde    = { version = "1",    features = ["derive"] }
+serde_json = "1"
+tokio    = { version = "1",    features = ["full"] }
+thiserror = "1"
+tracing  = "0.1"
+bytes    = "1"
+dotenvy  = "0.15"

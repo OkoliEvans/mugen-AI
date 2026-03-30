@@ -1,0 +1,77 @@
+# Elenxis — Prover (Python/EZKL Layer)
+
+This directory contains the Python prover worker. It is the only Python in the
+entire Elenxis stack. Rust owns everything else.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `export_model.py` | Export PyTorch model → ONNX + sample input.json |
+| `setup_circuit.py` | Compile ONNX → ZK circuit, generate pk/vk keys (run once) |
+| `worker.py` | Main worker process — spawned by Rust per proof job |
+| `benchmark.py` | Phase 1 spike benchmark — measures time, RAM, proof size |
+| `gen_verifier.py` | Generate Solidity verifier contract from vk.key |
+| `requirements.txt` | Python dependencies |
+| `Dockerfile` | Container for the prover worker |
+
+## Setup
+
+```bash
+# Install deps
+pip install -r requirements.txt
+
+# 1. Export model
+python export_model.py --model resnet18 --out-dir ./artifacts
+
+# 2. Compile circuit + generate keys (slow, run once)
+python setup_circuit.py --artifacts-dir ./artifacts
+
+# 3. Run benchmark to validate environment
+python benchmark.py --artifacts-dir ./artifacts --runs 3
+
+# 4. Generate Solidity verifier
+python gen_verifier.py --artifacts-dir ./artifacts --contracts-dir ../contracts/src
+```
+
+## Rust ↔ Python Interface
+
+Rust spawns `worker.py` as a subprocess per proof job.
+
+**stdin** (JSON):
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "input_data": [[0.1, 0.2, ...]],
+  "artifacts_dir": "./artifacts"
+}
+```
+
+**stdout** (JSON, one line):
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "ok",
+  "proof_path": "/tmp/550e8400_proof.json"
+}
+```
+
+**exit codes:** `0` = success, `1` = failure
+
+## Artifacts Directory
+
+After `setup_circuit.py`, the `artifacts/` directory contains:
+
+```
+artifacts/
+├── model.onnx          # exported model
+├── input.json          # sample input for calibration
+├── settings.json       # circuit precision settings
+├── model.compiled      # arithmetic circuit
+├── vk.key              # verification key (public)
+├── pk.key              # proving key (private, large)
+└── benchmark_results.json  # after running benchmark.py
+```
+
+`pk.key` can be several GB for large models. Mount it as a volume in production,
+don't bake it into the Docker image.

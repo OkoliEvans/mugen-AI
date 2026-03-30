@@ -1,0 +1,12 @@
+{
+  "batch_id": "1",
+  "job_inputs": [
+    {
+      "job_id": "1",
+      "input_data": [[-1.0848544836044312, 1.8041995763778687, -1.1737548112869263, -0.0021303067915141582]]
+    }
+  ],
+  "artifacts_dir": "./artifacts-aggr",
+  "agg_artifacts": "./agg_artifacts",
+  "output_path": "/tmp/batch_1_aggregated.json"
+}

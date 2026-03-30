@@ -1,0 +1,11 @@
+[workspace]
+members = [
+    "crates/aggregator",
+    "crates/common",
+    "crates/gateway",
+    "crates/ipfs",
+    "crates/prover-manager",
+    "crates/settler",
+
+]
+resolver = "2"
