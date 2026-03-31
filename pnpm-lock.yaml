@@ -42,7 +42,7 @@ importers:
   sdk:
     dependencies:
       axios:
-        specifier: 1.13.6
+        specifier: ^1.6.0
         version: 1.13.6
       ws:
         specifier: ^8.16.0
