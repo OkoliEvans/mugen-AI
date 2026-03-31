@@ -33,3 +33,4 @@ prover/artifacts/
 
 # OS
 .DS_Storepnpm-lock.yaml
+package-lock.json
