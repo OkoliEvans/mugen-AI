@@ -1,1 +1,0 @@
-{"version":3,"file":"poller.d.ts","sourceRoot":"","sources":["../src/poller.ts"],"names":[],"mappings":"AAAA,OAAO,EAAE,aAAa,EAAE,MAAM,OAAO,CAAC;AACtC,OAAO,EAAE,GAAG,EAAE,MAAM,SAAS,CAAC;AAM9B;;;;;;;;;;;GAWG;AACH,wBAAsB,aAAa,CACjC,MAAM,EAAE,aAAa,EACrB,KAAK,EAAE,MAAM,EACb,SAAS,EAAE,MAAM,EACjB,UAAU,EAAE,MAAM,GACjB,OAAO,CAAC,GAAG,CAAC,CA8Bd"}

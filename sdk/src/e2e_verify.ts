@@ -49,7 +49,7 @@ async function main() {
   const client = new ElenxisClient({
     gatewayUrl:     GATEWAY_URL,
     timeoutMs:      TIMEOUT_MS,
-    pollIntervalMs: 2_000,   // poll every 2 s — tune down if your prover is fast
+    pollIntervalMs: 4_000,   // poll every 4 s — tune down if your prover is fast
     maxRetries:     3,
   });
 

@@ -1,3 +1,4 @@
 packages:
   - 'sdk'
+  - 'mugen-ui'
   - 'crates/*'

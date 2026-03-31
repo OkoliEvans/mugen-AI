@@ -1,9 +1,35 @@
+# Python
 .venv/
+.venv-aggr/
 __pycache__/
 *.pyc
+
+# Rust
+**/target/
+
+# Node
+node_modules/
+sdk/dist/
+
+# Foundry — dependencies and build output
+contracts/evm/lib/
+contracts/evm/out/
+contracts/lib/
+contracts/out/
+
+# StarkNet build
+contracts/starknet_l2/target/
+
+# Prover artifacts
 artifacts/pk.key
 artifacts/*.compiled
-/target
-node_modules
-.venv-aggr
+artifacts/*.onnx
+prover/artifacts/
+
+# Env / secrets
 .env
+.env.*
+.npmrc
+
+# OS
+.DS_Storepnpm-lock.yaml

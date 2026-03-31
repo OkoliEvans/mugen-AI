@@ -2,6 +2,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum SettlerError {
+    // ── Existing variants (unchanged) ─────────────────────────────────────────
     #[error("environment variable missing: {0}")]
     MissingEnv(String),
 
@@ -28,4 +29,16 @@ pub enum SettlerError {
 
     #[error("transaction timed out after {0}s")]
     TxTimeout(u64),
+
+    // ── New variants (additive) ───────────────────────────────────────────────
+    /// Missing or invalid config for a specific chain path (e.g. starknet env vars not set)
+    #[error("config error: {0}")]
+    ConfigError(String),
+
+    /// StarkNet L1→L2 settlement did not confirm within the polling window.
+    #[error("starknet settlement not confirmed after {attempts} attempts ({interval_secs}s each)")]
+    StarknetTimeout {
+        attempts:      u32,
+        interval_secs: u64,
+    },
 }

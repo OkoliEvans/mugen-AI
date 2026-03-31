@@ -75,18 +75,18 @@ pub struct BatchUpdate {
 #[diesel(table_name = jobs)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
 pub struct Job {
-    pub id:           Uuid,
-    pub model_id:     Uuid,
-    pub status:       String,
-    pub input_hash:   String,
-    pub proof_path:   Option<String>,
-    pub error:        Option<String>,
-    pub submitted_at: DateTime<Utc>,
-    pub started_at:   Option<DateTime<Utc>>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub settled_at:   Option<DateTime<Utc>>,
-    pub tx_hash:      Option<String>,
-    pub batch_id:     Option<Uuid>,
+    pub id:               Uuid,
+    pub model_id:         Uuid,
+    pub status:           String,
+    pub input_hash:       String,
+    pub proof_path:       Option<String>,
+    pub error:            Option<String>,
+    pub submitted_at:     DateTime<Utc>,
+    pub started_at:       Option<DateTime<Utc>>,
+    pub completed_at:     Option<DateTime<Utc>>,
+    pub settled_at:       Option<DateTime<Utc>>,
+    pub tx_hash:          Option<String>,
+    pub batch_id:         Option<Uuid>,
 }
 
 #[derive(Debug, Insertable)]

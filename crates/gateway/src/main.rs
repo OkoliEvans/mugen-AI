@@ -64,6 +64,7 @@ struct AppState {
     /// None when PINATA_JWT is not set — model registration endpoint will
     /// return 503 until the gateway is configured with IPFS credentials.
     ipfs_client:    Option<Arc<PinataClient>>,
+    // NOTE: no chain_cfg field — SettlerConfig owns all per-chain config.
 }
 
 // ── Request / response types ──────────────────────────────────────────────────
@@ -73,6 +74,7 @@ struct SubmitRequest {
     input_data: Vec<Vec<f64>>,
     #[serde(default = "default_model_id")]
     model_id: String,
+
 }
 
 fn default_model_id() -> String {
@@ -95,6 +97,7 @@ struct JobStatusResponse {
     tx_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+
 }
 
 #[derive(Debug, Serialize)]
@@ -152,16 +155,11 @@ fn err(msg: impl Into<String>) -> Json<ErrorResponse> {
 /// Look up a model by name (treating model_id string as name).
 /// If not found, insert a placeholder record with derived input_shape.
 /// If found but input_shape is still empty (legacy placeholder), patch it.
-///
-/// NOTE: ipfs_cid and on_chain_hash remain "pending" until the full
-/// POST /v1/models registration flow is implemented (IPFS pin + on-chain
-/// registerModel() call). This is intentional for the dev phase.
 async fn upsert_model(
     pool: &DbPool,
     name: &str,
     input_data: &[Vec<f64>],
 ) -> Result<(Uuid, String), String> {
-    // Derive shape [rows, cols] from the actual input
     let shape = serde_json::json!([
         input_data.len(),
         input_data.first().map(|r| r.len()).unwrap_or(0)
@@ -169,8 +167,6 @@ async fn upsert_model(
 
     match repo::find_model_by_name(pool, name).await {
         Ok(m) => {
-            // Patch shape if this row was inserted as a placeholder before
-            // this fix was deployed (i.e. shape is still empty array [])
             if m.input_shape == serde_json::json!([]) {
                 if let Err(e) = repo::update_model_shape(pool, m.id, shape).await {
                     warn!("failed to patch input_shape for model {}: {e}", m.id);
@@ -182,7 +178,6 @@ async fn upsert_model(
         Err(e) => return Err(e.to_string()),
     }
 
-    // Not found — insert with derived shape
     let version = "0.1.0".to_string();
     let new = NewModel {
         id: Uuid::new_v4(),
@@ -210,12 +205,14 @@ fn hash_input(input_data: &[Vec<f64>]) -> String {
 
 /// Spawned after job submission. Tracks the job through its full lifecycle
 /// and persists every state transition to Postgres.
+///
+
 fn spawn_settler(
-    state: AppState,
-    job_id: String,
-    db_job_id: Uuid,
-    model_name: String,
-    model_version: String,
+    state:            AppState,
+    job_id:           String,
+    db_job_id:        Uuid,
+    model_name:       String,
+    model_version:    String,
     input_data: Vec<Vec<f64>>,
 ) {
     tokio::spawn(async move {
@@ -236,7 +233,7 @@ fn spawn_settler(
         )
         .await;
 
-        // Poll prover-manager until Done or Failed
+        // Poll prover-manager until Done or Failed — unchanged
         let proof_path = {
             let mut attempts = 0u32;
             loop {
@@ -293,7 +290,7 @@ fn spawn_settler(
             }
         };
 
-        // Mark proof done in Postgres
+        // Mark proof done in Postgres — unchanged
         let _ = repo::update_job(
             &state.pool,
             db_job_id,
@@ -316,12 +313,19 @@ fn spawn_settler(
             return;
         }
 
-        let input_bytes = serde_json::to_vec(&input_data).unwrap_or_default();
+        let input_bytes  = serde_json::to_vec(&input_data).unwrap_or_default();
         let output_bytes = job_id.as_bytes().to_vec();
 
+        // Single call to settler.submit() — routes internally based on
         match state
             .settler
-            .submit(&proof_path, &model_name, &model_version, &input_bytes, &output_bytes)
+            .submit(
+                &proof_path,
+                &model_name,
+                &model_version,
+                &input_bytes,
+                &output_bytes,
+            )
             .await
         {
             Ok(tx_hash) if tx_hash == "already-verified" => {
@@ -343,7 +347,7 @@ fn spawn_settler(
                 .await;
             }
             Ok(tx_hash) => {
-                info!(%job_id, %tx_hash, "proof settled on-chain — persisting tx_hash");
+                info!(%job_id, %tx_hash, "proof settled on StarkNet — persisting");
                 let _ = repo::update_job(
                     &state.pool,
                     db_job_id,
@@ -391,15 +395,11 @@ fn spawn_settler(
 ///   2. Pin artifact to IPFS via Pinata → CID
 ///   3. Call settler.register_model() → on-chain tx hash
 ///   4. Upsert model row in Postgres with CID + tx hash
-///
-/// Returns 503 if the gateway is not configured with IPFS credentials
-/// (PINATA_JWT not set). Returns 409 if the model is already registered.
 #[post("/v1/models")]
 async fn register_model(
     state: Data<AppState>,
     Json(req): Json<RegisterModelRequest>,
 ) -> impl Responder {
-    // ── Validate input ────────────────────────────────────────────────────────
     if req.name.trim().is_empty() || req.version.trim().is_empty() {
         return HttpResponse::BadRequest().json(err("name and version must not be empty"));
     }
@@ -410,7 +410,6 @@ async fn register_model(
         return HttpResponse::BadRequest().json(err("input_shape must not be empty"));
     }
 
-    // ── IPFS client must be configured ───────────────────────────────────────
     let ipfs = match state.ipfs_client.as_ref() {
         Some(c) => c,
         None => {
@@ -419,7 +418,6 @@ async fn register_model(
         }
     };
 
-    // ── Reject if already registered ─────────────────────────────────────────
     match repo::find_model_by_name(&state.pool, &req.name).await {
         Ok(m) if m.ipfs_cid != "pending" => {
             return HttpResponse::Conflict().json(err(format!(
@@ -434,7 +432,6 @@ async fn register_model(
         }
     }
 
-    // ── 1. Decode artifact ────────────────────────────────────────────────────
     let artifact_bytes = match base64::decode(&req.artifact_b64) {
         Ok(b) => bytes::Bytes::from(b),
         Err(e) => {
@@ -450,7 +447,6 @@ async fn register_model(
         "registering model"
     );
 
-    // ── 2. Pin artifact to IPFS ───────────────────────────────────────────────
     let filename = format!("{}_{}.onnx", req.name, req.version.replace('.', "_"));
     let meta = PinMeta {
         name: format!("{}@{}", req.name, req.version),
@@ -472,13 +468,11 @@ async fn register_model(
     let gateway_url = ipfs.gateway_url(&ipfs_cid);
     info!(model_name = %req.name, %ipfs_cid, "artifact pinned to IPFS");
 
-    // ── 3. Register on-chain ──────────────────────────────────────────────────
     if !state.settle_enabled {
         warn!(
             model_name = %req.name,
             "settlement disabled — skipping on-chain registration"
         );
-        // Still persist the CID so the record isn't stuck at "pending"
         let on_chain_hash = upsert_registered_model(
             &state.pool,
             &req.name,
@@ -516,7 +510,6 @@ async fn register_model(
 
     info!(model_name = %req.name, %on_chain_hash, "model registered on-chain");
 
-    // ── 4. Persist to Postgres ────────────────────────────────────────────────
     match upsert_registered_model(
         &state.pool,
         &req.name,
@@ -539,8 +532,6 @@ async fn register_model(
         }
         Err(e) => {
             error!(model_name = %req.name, "DB persist failed after on-chain registration: {e}");
-            // On-chain tx already confirmed — return partial success with the CID
-            // and tx hash so the caller can manually reconcile the DB if needed.
             HttpResponse::MultiStatus().json(serde_json::json!({
                 "warning":       "model registered on-chain but DB update failed",
                 "ipfs_cid":      ipfs_cid,
@@ -563,7 +554,6 @@ async fn upsert_registered_model(
 ) -> Result<(Uuid, String), String> {
     let shape = serde_json::json!(input_shape);
 
-    // Derive the same modelId the contract uses: keccak256(name + version)
     use alloy::primitives::keccak256;
     let mut model_id_input = Vec::with_capacity(name.len() + version.len());
     model_id_input.extend_from_slice(name.as_bytes());
@@ -572,12 +562,10 @@ async fn upsert_registered_model(
 
     match repo::find_model_by_name(pool, name).await {
         Ok(m) => {
-            // Row exists (lazy placeholder) — update all fields
             repo::update_model_registration(pool, m.id, ipfs_cid.to_string(), on_chain_hash.to_string())
                 .await
                 .map_err(|e| e.to_string())?;
 
-            // Also patch shape if it was never set
             if m.input_shape == serde_json::json!([]) {
                 let _ = repo::update_model_shape(pool, m.id, shape).await;
             }
@@ -585,7 +573,6 @@ async fn upsert_registered_model(
             Ok((m.id, on_chain_model_id))
         }
         Err(common::error::CommonError::NotFound(_)) => {
-            // No placeholder row — insert fresh
             let id = Uuid::new_v4();
             let new = NewModel {
                 id,
@@ -644,7 +631,7 @@ async fn submit_job(state: Data<AppState>, Json(req): Json<SubmitRequest>) -> im
         }
     };
 
-    // 3. Parse job_id as UUID (prover-manager uses uuid::Uuid internally)
+    // 3. Parse job_id as UUID
     let db_job_id = match Uuid::parse_str(&job_id) {
         Ok(id) => id,
         Err(e) => {
@@ -656,15 +643,14 @@ async fn submit_job(state: Data<AppState>, Json(req): Json<SubmitRequest>) -> im
     // 4. Persist job record to Postgres
     let input_hash = hash_input(&input_data);
     let new_job = NewJob {
-        id: db_job_id,
-        model_id: model_uuid,
-        status: "queued".into(),
+        id:         db_job_id,
+        model_id:   model_uuid,
+        status:     "queued".into(),
         input_hash,
     };
 
     if let Err(e) = repo::insert_job(&state.pool, new_job).await {
         error!(%job_id, "failed to persist job to DB: {e}");
-        // Non-fatal — job still runs, just not persisted
     }
 
     info!(%job_id, %model_name, "job submitted and persisted");
@@ -686,8 +672,7 @@ async fn submit_job(state: Data<AppState>, Json(req): Json<SubmitRequest>) -> im
 }
 
 /// GET /v1/jobs/{id}
-/// Reads from Postgres for settled/failed jobs, falls back to in-memory
-/// for in-flight jobs (queued/running).
+/// Always prefers Postgres — in-memory fallback only when Postgres has no record yet.
 #[get("/v1/jobs/{id}")]
 async fn get_job_status(state: Data<AppState>, path: Path<String>) -> impl Responder {
     let job_id_str = path.into_inner();
@@ -699,50 +684,38 @@ async fn get_job_status(state: Data<AppState>, path: Path<String>) -> impl Respo
         }
     };
 
-    // Try Postgres first for terminal states
+    // Always try Postgres first — it has tx_hash once settled.
+    // Only fall back to in-memory when Postgres has no record yet (queued/running
+    // before the first DB write completes).
     if let Ok(job) = repo::find_job(&state.pool, db_id).await {
-        if job.status == "settled" || job.status == "failed" || job.status == "done" {
-            return HttpResponse::Ok().json(JobStatusResponse {
-                job_id: job_id_str,
-                status: job.status,
-                proof_path: job.proof_path,
-                tx_hash: job.tx_hash,
-                reason: job.error,
-            });
-        }
+        return HttpResponse::Ok().json(JobStatusResponse {
+            job_id:     job_id_str,
+            status:     job.status,
+            proof_path: job.proof_path,
+            tx_hash:    job.tx_hash,
+            reason:     job.error,
+        });
     }
 
-    // Fall back to in-memory for queued/running
+    // Postgres has no record yet — fall back to in-memory prover manager
     match state.manager.status(&job_id_str).await {
         Ok(job_state) => {
             let response = match job_state {
                 JobState::Queued => JobStatusResponse {
-                    job_id: job_id_str,
-                    status: "queued".into(),
-                    proof_path: None,
-                    tx_hash: None,
-                    reason: None,
+                    job_id: job_id_str, status: "queued".into(),
+                    proof_path: None, tx_hash: None, reason: None,
                 },
                 JobState::Running => JobStatusResponse {
-                    job_id: job_id_str,
-                    status: "running".into(),
-                    proof_path: None,
-                    tx_hash: None,
-                    reason: None,
+                    job_id: job_id_str, status: "running".into(),
+                    proof_path: None, tx_hash: None, reason: None,
                 },
                 JobState::Done { proof_path } => JobStatusResponse {
-                    job_id: job_id_str,
-                    status: "done".into(),
-                    proof_path: Some(proof_path),
-                    tx_hash: None,
-                    reason: None,
+                    job_id: job_id_str, status: "done".into(),
+                    proof_path: Some(proof_path), tx_hash: None, reason: None,
                 },
                 JobState::Failed { reason } => JobStatusResponse {
-                    job_id: job_id_str,
-                    status: "failed".into(),
-                    proof_path: None,
-                    tx_hash: None,
-                    reason: Some(reason),
+                    job_id: job_id_str, status: "failed".into(),
+                    proof_path: None, tx_hash: None, reason: Some(reason),
                 },
             };
             HttpResponse::Ok().json(response)
@@ -750,6 +723,7 @@ async fn get_job_status(state: Data<AppState>, path: Path<String>) -> impl Respo
         Err(_) => HttpResponse::NotFound().json(err(format!("job not found: {job_id_str}"))),
     }
 }
+
 
 /// GET /v1/jobs/{id}/proof
 #[get("/v1/jobs/{id}/proof")]
@@ -795,7 +769,6 @@ async fn get_proof(state: Data<AppState>, path: Path<String>) -> impl Responder 
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    // Load .env from workspace root
     let env_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
@@ -817,36 +790,46 @@ async fn main() -> std::io::Result<()> {
 
     // ── Database pool ─────────────────────────────────────────────────────────
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
-
     let pool = common::db::build_pool(&database_url).expect("failed to build DB pool");
-
-    // Run pending Diesel migrations on startup
     common::db::run_migrations(&pool)
         .await
         .expect("failed to run DB migrations");
 
     info!("database connected and migrations applied");
-
     let pool = Arc::new(pool);
 
     // ── Prover manager ────────────────────────────────────────────────────────
     let manager = Arc::new(ProverManager::new(prover_config()));
 
     // ── Settler ───────────────────────────────────────────────────────────────
+    // SettlerConfig::from_env() loads ALL chain config (eth-sepolia, base-sepolia,
+    // starknet) in a single pass. No separate ChainConfig needed.
     let (settler, settle_enabled) = match SettlerConfig::from_env() {
         Ok(cfg) => {
-            info!("on-chain settlement enabled → {}", cfg.contract_address);
+            info!(
+                verifier = %cfg.contract_address,
+                bridge   = %cfg.eth_sepolia_inference_bridge,
+                "on-chain settlement enabled (StarkNet path)"
+            );
             (Arc::new(Settler::new(cfg)), true)
         }
         Err(e) => {
             warn!("settlement disabled ({e}) — set SETTLER_* env vars to enable");
+            // Dummy config — all required fields preserved, new fields default to empty.
+            // Base-sepolia and starknet paths will return ConfigError if attempted
+            // while settle_enabled = false, which is gated above in spawn_settler.
             let dummy_cfg = SettlerConfig {
-                rpc_url: "http://localhost:8545".into(),
-                private_key: "0x0000000000000000000000000000000000000000000000000000000000000001"
-                    .into(),
+                rpc_url:          "http://localhost:8545".into(),
+                private_key:      "0x0000000000000000000000000000000000000000000000000000000000000001".into(),
                 contract_address: "0x0000000000000000000000000000000000000000".into(),
-                confirmations: 1,
-                tx_timeout_secs: 120,
+                confirmations:    1,
+                tx_timeout_secs:  120,
+                eth_sepolia_inference_bridge: String::new(),
+                starknet_rpc:                 String::new(),
+                starknet_inference_verifier:  String::new(),
+                starknet_poll_interval_secs:  15,
+                starknet_max_poll_attempts:   24,
+                starknet_bridge_fee_wei:      0,
             };
             (Arc::new(Settler::new(dummy_cfg)), false)
         }
@@ -872,6 +855,7 @@ async fn main() -> std::io::Result<()> {
         pool,
         settle_enabled,
         ipfs_client,
+        // No chain_cfg — SettlerConfig owns all per-chain config
     });
 
     HttpServer::new(move || {

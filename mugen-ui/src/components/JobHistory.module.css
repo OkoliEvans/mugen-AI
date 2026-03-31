@@ -1,0 +1,170 @@
+.wrap {
+  border-top: 1px solid var(--border);
+  padding-top: 1.5rem;
+}
+
+.toggle {
+  display:         flex;
+  align-items:     center;
+  justify-content: space-between;
+  width:           100%;
+  background:      none;
+  border:          none;
+  color:           var(--muted-hi);
+  font-family:     var(--sans);
+  font-size:       .8125rem;
+  font-weight:     600;
+  letter-spacing:  .05em;
+  cursor:          pointer;
+  padding:         0;
+  transition:      color .15s;
+}
+.toggle:hover { color: var(--text); }
+
+.toggleLabel {
+  display:     flex;
+  align-items: center;
+  gap:         .5rem;
+}
+
+.count {
+  font-size:     .7rem;
+  background:    var(--border-hi);
+  color:         var(--muted-hi);
+  padding:       .1rem .4rem;
+  border-radius: 10px;
+}
+
+.chevron {
+  font-size:  .75rem;
+  transition: transform .2s;
+}
+
+.list {
+  margin-top:     1rem;
+  display:        flex;
+  flex-direction: column;
+  gap:            .25rem;
+}
+
+.listHeader {
+  display:         flex;
+  justify-content: space-between;
+  align-items:     center;
+  margin-bottom:   .5rem;
+}
+
+.listHint {
+  font-size:   .7rem;
+  color:       var(--muted);
+  font-family: var(--mono);
+}
+
+.clearBtn {
+  font-family: var(--mono);
+  font-size:   .7rem;
+  background:  none;
+  border:      none;
+  color:       var(--muted);
+  cursor:      pointer;
+  padding:     0;
+  transition:  color .15s;
+}
+.clearBtn:hover { color: var(--danger); }
+
+.row {
+  padding:       .625rem .75rem;
+  border:        1px solid var(--border);
+  border-radius: 4px;
+  cursor:        pointer;
+  transition:    border-color .15s, background .15s;
+}
+.row:hover { border-color: var(--border-hi); background: var(--surface); }
+
+.rowMain {
+  display:     flex;
+  align-items: center;
+  gap:         .75rem;
+  font-size:   .8125rem;
+}
+
+.rowId {
+  font-family: var(--mono);
+  color:       var(--muted-hi);
+  font-size:   .75rem;
+  flex-shrink: 0;
+}
+
+.rowModel {
+  font-family: var(--mono);
+  font-size:   .75rem;
+  color:       var(--text);
+  flex:        1;
+}
+
+.rowElapsed {
+  font-family: var(--mono);
+  font-size:   .75rem;
+  color:       var(--muted-hi);
+}
+
+.rowTime {
+  font-size:   .7rem;
+  color:       var(--muted);
+}
+
+.badge {
+  font-size:      .65rem;
+  font-weight:    600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  padding:        .125rem .45rem;
+  border-radius:  2px;
+}
+.settled {
+  background: rgba(200, 240, 96, .1);
+  color:      var(--accent-dim);
+  border:     1px solid rgba(200, 240, 96, .2);
+}
+
+.detail {
+  margin-top:     .625rem;
+  padding-top:    .625rem;
+  border-top:     1px solid var(--border);
+  display:        flex;
+  flex-direction: column;
+  gap:            .375rem;
+}
+
+.detailRow {
+  display:         flex;
+  justify-content: space-between;
+  align-items:     flex-start;
+  gap:             1rem;
+}
+
+.dk {
+  font-size:      .7rem;
+  font-weight:    600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color:          var(--muted);
+  flex-shrink:    0;
+}
+
+.dv {
+  font-family: var(--mono);
+  font-size:   .75rem;
+  color:       var(--muted-hi);
+  word-break:  break-all;
+  text-align:  right;
+}
+
+.dvLink {
+  font-family:     var(--mono);
+  font-size:       .75rem;
+  color:           var(--accent);
+  text-decoration: none;
+  text-align:      right;
+}
+.dvLink:hover { text-decoration: underline; }

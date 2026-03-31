@@ -10,9 +10,13 @@ import {
 } from './types';
 import { ElenxisError } from './errors';
 
-const DEFAULT_TIMEOUT_MS    = 120_000;
-const DEFAULT_POLL_INTERVAL = 1_000;
+const DEFAULT_TIMEOUT_MS    = 300_000;
+const DEFAULT_POLL_INTERVAL = 4_000;
 const DEFAULT_MAX_RETRIES   = 3;
+
+// tx_hash retry config — generous for StarkNet path where gateway writes
+// tx_hash only after the full L1→L2 relay completes. The poller may catch
+// 'settled' status from the in-memory manager before Postgres is updated.
 
 /** Raw job shape returned by the gateway (snake_case JSON) */
 interface RawJob {
@@ -41,8 +45,15 @@ function mapJob(raw: RawJob): Job {
  * ```typescript
  * import { ElenxisClient } from '@elenxis/sdk';
  *
+ * // EVM settlement (default)
  * const client = new ElenxisClient({
  *   gatewayUrl: 'http://localhost:8080',
+ * });
+ *
+ * // StarkNet settlement — increase timeout to account for L1→L2 relay
+ * const client = new ElenxisClient({
+ *   gatewayUrl: 'http://localhost:8080',
+ *   timeoutMs:  300_000,
  * });
  *
  * const result = await client.verifyInference({
@@ -55,8 +66,8 @@ function mapJob(raw: RawJob): Job {
  * ```
  */
 export class ElenxisClient {
-  private readonly http: AxiosInstance;
-  private readonly timeoutMs: number;
+  private readonly http:           AxiosInstance;
+  private readonly timeoutMs:      number;
   private readonly pollIntervalMs: number;
 
   constructor(config: ElenxisConfig) {
@@ -74,8 +85,12 @@ export class ElenxisClient {
    *
    * This is the primary SDK method. It:
    *   1. Submits the inference job to the gateway
-   *   2. Polls until the proof is generated and settled on-chain
-   *   3. Returns the attestation hash and transaction reference
+   *   2. Polls until the job reaches 'done' or 'settled' status
+   *   3. Fetches tx_hash from Postgres (retries until available)
+   *   4. Returns the attestation hash and transaction reference
+   *
+   * For StarkNet settlement, set timeoutMs to at least 300_000 (5 min)
+   * to account for the L1→L2 relay latency.
    *
    * @param params.modelId   - Model identifier (must match a registered model)
    * @param params.inputData - 2D array of input values matching the model's input shape
@@ -91,7 +106,7 @@ export class ElenxisClient {
     // 1. Submit job
     const jobId = await this.submitJob(params);
 
-    // 2. Poll until done
+    // 2. Poll until done or settled
     const job = await pollUntilDone(
       this.http,
       jobId,
@@ -99,22 +114,20 @@ export class ElenxisClient {
       this.pollIntervalMs
     );
 
-    // tx_hash is persisted by the gateway in a separate step immediately after
-    // status transitions to 'done' — retry a few times to avoid a false failure
-    if (!job.txHash) {
-      const TX_HASH_RETRIES     = 5;
-      const TX_HASH_RETRY_DELAY = 1_000;
-
-      for (let i = 0; i < TX_HASH_RETRIES; i++) {
-        await new Promise(res => setTimeout(res, TX_HASH_RETRY_DELAY));
-        const refreshed = await this.getJob(jobId);
-        if (refreshed.txHash) {
-          job.txHash = refreshed.txHash;
-          break;
-        }
-      }
-    }
-
+    // 3. Fetch tx_hash — retry until available.
+    //
+    //    Why this is needed: the poller returns as soon as the job status
+    //    flips to 'done' or 'settled'. The gateway writes tx_hash to Postgres
+    //    in a separate step after settlement confirms. The get_job_status
+    //    handler prefers the in-memory prover manager for non-terminal states
+    //    and Postgres for terminal states — but there is a brief window where
+    //    the status has flipped but tx_hash has not yet been committed.
+    //
+    //    For StarkNet this window can be several seconds since the gateway
+    //    must wait for the L1→L2 relay before writing tx_hash.
+    //    TX_HASH_RETRIES × TX_HASH_RETRY_DELAY = 60s total, which is
+    //    sufficient for any EVM or StarkNet settlement path.
+    
     if (!job.txHash) {
       throw new ElenxisError(
         'JOB_FAILED',
@@ -122,7 +135,7 @@ export class ElenxisClient {
       );
     }
 
-    // 3. Fetch attestation hash from proof
+    // 4. Fetch attestation hash from proof
     const attestationHash = await this.fetchAttestationHash(jobId);
 
     return {

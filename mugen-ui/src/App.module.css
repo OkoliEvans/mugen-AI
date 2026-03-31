@@ -1,0 +1,255 @@
+.root {
+  min-height:     100vh;
+  display:        flex;
+  flex-direction: column;
+  max-width:      1200px;
+  margin:         0 auto;
+  padding:        0 2rem;
+}
+
+/* ── Nav ── */
+.nav {
+  display:         flex;
+  align-items:     center;
+  justify-content: space-between;
+  padding:         1.25rem 0;
+  border-bottom:   1px solid var(--border);
+  position:        sticky;
+  top:             0;
+  background:      var(--bg);
+  z-index:         10;
+}
+
+.wordmark {
+  font-family:    var(--sans);
+  font-size:      1.125rem;
+  font-weight:    800;
+  letter-spacing: -.02em;
+  color:          var(--text);
+}
+
+.navRight {
+  display:     flex;
+  align-items: center;
+  gap:         1rem;
+}
+
+.navBtn {
+  font-family:    var(--mono);
+  font-size:      .75rem;
+  background:     none;
+  border:         none;
+  color:          var(--muted-hi);
+  cursor:         pointer;
+  padding:        0;
+  text-decoration: none;
+  transition:     color .15s;
+}
+.navBtn:hover { color: var(--text); }
+
+.health {
+  display:     flex;
+  align-items: center;
+  gap:         .375rem;
+  font-family: var(--mono);
+  font-size:   .75rem;
+  color:       var(--muted-hi);
+}
+
+.healthDot {
+  width:         7px;
+  height:        7px;
+  border-radius: 50%;
+  flex-shrink:   0;
+}
+
+/* ── Hero ── */
+.hero {
+  padding:   5rem 0 4rem;
+  max-width: 680px;
+  animation: fadeUp .6s ease both;
+}
+
+.heroTag {
+  font-family:    var(--mono);
+  font-size:      .75rem;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color:          var(--muted-hi);
+  margin-bottom:  1.25rem;
+}
+
+.heroTitle {
+  font-family:    var(--sans);
+  font-size:      clamp(2.25rem, 5vw, 3.5rem);
+  font-weight:    800;
+  line-height:    1.1;
+  letter-spacing: -.03em;
+  color:          var(--text);
+  margin-bottom:  1.25rem;
+}
+
+.heroAccent { color: var(--accent); }
+
+.heroSub {
+  font-size:   1rem;
+  color:       var(--muted-hi);
+  line-height: 1.7;
+  max-width:   520px;
+}
+
+/* ── Main ── */
+.main {
+  display:               grid;
+  grid-template-columns: 1fr 1fr;
+  gap:                   4rem;
+  padding-bottom:        5rem;
+  animation:             fadeUp .6s .1s ease both;
+}
+
+@media (max-width: 800px) {
+  .main { grid-template-columns: 1fr; gap: 3rem; }
+  .hero { padding: 3rem 0 2.5rem; }
+}
+
+/* ── Section label ── */
+.sectionLabel {
+  font-family:    var(--mono);
+  font-size:      .7rem;
+  font-weight:    500;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color:          var(--muted);
+  margin-bottom:  .75rem;
+}
+
+/* ── Code blocks ── */
+.codeBlock {
+  position:      relative;
+  background:    var(--surface);
+  border:        1px solid var(--border);
+  border-radius: 4px;
+  padding:       1rem;
+}
+
+.code {
+  font-family: var(--mono);
+  font-size:   .875rem;
+  color:       var(--accent);
+}
+
+.pre {
+  font-family: var(--mono);
+  font-size:   .8125rem;
+  color:       var(--text);
+  line-height: 1.7;
+  white-space: pre;
+  overflow-x:  auto;
+}
+
+.copyBtn {
+  position:    absolute;
+  top:         .625rem;
+  right:       .625rem;
+  font-family: var(--mono);
+  font-size:   .7rem;
+  background:  var(--border-hi);
+  border:      none;
+  border-radius: 3px;
+  color:       var(--muted-hi);
+  padding:     .2rem .5rem;
+  cursor:      pointer;
+  transition:  color .15s, background .15s;
+}
+.copyBtn:hover { color: var(--text); background: var(--border); }
+
+/* ── Steps ── */
+.steps {
+  list-style:     none;
+  display:        flex;
+  flex-direction: column;
+  gap:            1.25rem;
+}
+
+.step {
+  display:     flex;
+  align-items: flex-start;
+  gap:         1rem;
+}
+
+.stepNum {
+  font-family:  var(--mono);
+  font-size:    .7rem;
+  color:        var(--accent-dim);
+  flex-shrink:  0;
+  padding-top:  .125rem;
+  letter-spacing: .04em;
+}
+
+.stepTitle {
+  font-size:   .875rem;
+  font-weight: 600;
+  color:       var(--text);
+  margin-bottom: .2rem;
+}
+
+.stepDesc {
+  font-size:   .8125rem;
+  color:       var(--muted-hi);
+  line-height: 1.5;
+}
+
+/* ── Gateway info ── */
+.gatewayInfo {
+  display:               grid;
+  grid-template-columns: auto 1fr;
+  gap:                   .375rem 1rem;
+  margin-top:            2rem;
+  padding:               .875rem 1rem;
+  background:            var(--surface);
+  border:                1px solid var(--border);
+  border-radius:         4px;
+  align-items:           center;
+}
+
+.gwLabel {
+  font-family:    var(--mono);
+  font-size:      .7rem;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color:          var(--muted);
+}
+
+.gwVal {
+  font-family: var(--mono);
+  font-size:   .8125rem;
+  color:       var(--text);
+}
+
+/* ── Playground ── */
+.playground { display: flex; flex-direction: column; }
+
+.card {
+  background:    var(--surface);
+  border:        1px solid var(--border);
+  border-radius: 6px;
+  padding:       1.5rem;
+}
+
+/* ── Footer ── */
+.footer {
+  margin-top:      auto;
+  padding:         1.5rem 0;
+  border-top:      1px solid var(--border);
+  display:         flex;
+  align-items:     center;
+  gap:             .75rem;
+  font-family:     var(--mono);
+  font-size:       .75rem;
+  color:           var(--muted);
+}
+
+.footer a { color: var(--muted); text-decoration: none; transition: color .15s; }
+.footer a:hover { color: var(--text); }
+
+.footerDot { color: var(--border-hi); }

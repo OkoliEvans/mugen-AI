@@ -1,0 +1,7 @@
+src/
+*.test.ts
+*.test.js
+e2e_verify.*
+tsconfig.json
+jest.config.js
+.env*

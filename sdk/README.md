@@ -1,8 +1,8 @@
-# @Mugen/sdk
+# @mugen/sdk
 
-TypeScript SDK for the [Mugen Verifiable Inference Network](https://Mugen.xyz).
+TypeScript SDK for the [Mugen Verifiable Inference Network](https://mugen.xyz).
 
-Submit AI inference jobs, receive ZK proofs, and verify them on-chain — in a single function call.
+Submit AI inference jobs, receive ZK proofs, and verify them on StarkNet — in a single function call.
 
 ---
 
@@ -27,7 +27,7 @@ To use the SDK in another package within the monorepo, add it as a local depende
 ```json
 {
   "dependencies": {
-    "@Mugen/sdk": "file:../sdk"
+    "@mugen/sdk": "file:../sdk"
   }
 }
 ```
@@ -37,10 +37,11 @@ To use the SDK in another package within the monorepo, add it as a local depende
 ## Quick start
 
 ```typescript
-import { MugenClient } from '@Mugen/sdk';
+import { ElenxisClient } from '@mugen/sdk';
 
-const client = new MugenClient({
+const client = new ElenxisClient({
   gatewayUrl: 'http://localhost:8080',
+  timeoutMs:  300_000, // 5 min — accounts for L1→L2 StarkNet relay time
 });
 
 const result = await client.verifyInference({
@@ -58,12 +59,12 @@ console.log('Time taken:       ', result.elapsedMs, 'ms');
 
 ## API
 
-### `new MugenClient(config)`
+### `new ElenxisClient(config)`
 
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `gatewayUrl` | `string` | required | Gateway base URL |
-| `timeoutMs` | `number` | `120000` | Max wait for job completion (ms) |
+| `timeoutMs` | `number` | `300000` | Max wait for job completion (ms). Use ≥300000 — StarkNet L1→L2 relay takes 1–3 min |
 | `pollIntervalMs` | `number` | `1000` | Status polling interval (ms) |
 | `maxRetries` | `number` | `3` | HTTP retry attempts on failure |
 
@@ -71,12 +72,12 @@ console.log('Time taken:       ', result.elapsedMs, 'ms');
 
 ### `client.verifyInference(params)`
 
-The primary method. Submits an inference, waits for ZK proof generation, waits for on-chain settlement, and returns the result.
+The primary method. Submits an inference, waits for ZK proof generation, waits for on-chain settlement on StarkNet, and returns the result.
 
 ```typescript
 const result = await client.verifyInference({
-  modelId:   'tiny_mlp_v1',       // registered model identifier
-  inputData: [[0.1, 0.2, 0.3, 0.4]], // 2D input array
+  modelId:   'tiny_mlp_v1',            // registered model identifier
+  inputData: [[0.1, 0.2, 0.3, 0.4]],  // 2D input array matching model input shape
 });
 ```
 
@@ -85,9 +86,9 @@ const result = await client.verifyInference({
 ```typescript
 {
   jobId:           string;  // UUID of the proof job
-  attestationHash: string;  // keccak256 output hash stored on-chain
-  txHash:          string;  // on-chain settlement tx hash
-  elapsedMs:       number;  // total time from submit to settlement
+  attestationHash: string;  // keccak256-derived proof fingerprint (0x + 64 hex chars)
+  txHash:          string;  // Eth Sepolia tx hash from InferenceBridge.verifyAndBridge()
+  elapsedMs:       number;  // total wall time from submit to StarkNet confirmation
 }
 ```
 
@@ -112,7 +113,7 @@ Get current job status.
 
 ```typescript
 const job = await client.getJob(jobId);
-// job.status: 'queued' | 'running' | 'done' | 'failed'
+// job.status: 'queued' | 'running' | 'done' | 'settled' | 'failed'
 ```
 
 ---
@@ -133,7 +134,7 @@ Fetch the raw ZK proof for a completed job.
 
 ```typescript
 const proof = await client.getProof(jobId);
-// proof.proofHex  — hex-encoded proof bytes
+// proof.proofHex  — hex-encoded Halo2 KZG proof bytes
 // proof.sizeBytes — proof size in bytes
 ```
 
@@ -151,21 +152,21 @@ const healthy = await client.healthCheck();
 
 ## Error handling
 
-All errors thrown by the SDK are instances of `MugenError`.
+All errors thrown by the SDK are instances of `ElenxisError`.
 
 ```typescript
-import { MugenClient, MugenError } from '@Mugen/sdk';
+import { ElenxisClient, ElenxisError } from '@mugen/sdk';
 
 try {
   await client.verifyInference({ modelId: 'tiny_mlp_v1', inputData: [[0.1]] });
 } catch (err) {
-  if (err instanceof MugenError) {
+  if (err instanceof ElenxisError) {
     switch (err.code) {
       case 'TIMEOUT':
-        console.error('Job timed out — increase timeoutMs or check prover health');
+        console.error('Job timed out — increase timeoutMs to ≥300000 for StarkNet');
         break;
       case 'JOB_FAILED':
-        console.error('Proof generation failed:', err.message);
+        console.error('Proof generation or settlement failed:', err.message);
         break;
       case 'SUBMIT_FAILED':
         console.error('Could not reach gateway:', err.message);
@@ -181,7 +182,7 @@ try {
 |---|---|
 | `SUBMIT_FAILED` | Job submission request failed |
 | `POLL_FAILED` | Status polling request failed |
-| `JOB_FAILED` | Proof generation failed on the prover |
+| `JOB_FAILED` | Proof generation or on-chain settlement failed |
 | `TIMEOUT` | Job did not complete within `timeoutMs` |
 | `PROOF_FETCH_FAILED` | Could not retrieve proof bytes |
 | `NETWORK_ERROR` | Unclassified network error |
@@ -205,17 +206,14 @@ console.log('Job submitted:', jobId);
 
 // Then wait for completion
 const job = await client.waitForJob(jobId);
-console.log('Job done, tx:', job.txHash);
+console.log('Settled, tx:', job.txHash);
 ```
 
-### Custom timeout per request
+### Run the e2e test
 
-```typescript
-const client = new MugenClient({
-  gatewayUrl:    'http://localhost:8080',
-  timeoutMs:     300_000,  // 5 minutes for large models
-  pollIntervalMs: 2_000,   // poll every 2 seconds
-});
+```bash
+cd sdk
+GATEWAY_URL=http://localhost:8080 TIMEOUT_MS=300000 npx tsx e2e_verify.ts
 ```
 
 ---
@@ -257,12 +255,13 @@ npm run dev
 sdk/
 ├── src/
 │   ├── index.ts       — public exports
-│   ├── client.ts      — MugenClient (main class)
+│   ├── client.ts      — ElenxisClient (main class)
 │   ├── types.ts       — all TypeScript types
-│   ├── errors.ts      — MugenError class
+│   ├── errors.ts      — ElenxisError class
 │   ├── http.ts        — Axios client with retry logic
 │   ├── poller.ts      — job status polling
 │   └── client.test.ts — full test suite
+├── e2e_verify.ts      — live end-to-end test
 ├── package.json
 ├── tsconfig.json
 └── jest.config.js

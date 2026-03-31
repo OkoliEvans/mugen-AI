@@ -1,7 +1,12 @@
 use alloy::sol;
 
-// Generate type-safe bindings from the InferenceVerifier ABI inline.
-// Alloy's sol! macro generates a fully typed client — no manual ABI encoding.
+// ── InferenceVerifier — direct EVM settlement (eth-sepolia + base-sepolia) ────
+//
+// Used for:
+//   - submitProof()       — settle individual inference jobs on EVM chains
+//   - registerModel()     — register a model on-chain
+//   - isVerified()        — replay guard before submitting
+//   - isRegisteredModel() — guard before registering
 sol!(
     #[allow(missing_docs)]
     #[sol(rpc)]
@@ -114,10 +119,73 @@ sol!(
     ]"#
 );
 
+// ── InferenceBridge — StarkNet settlement path only ───────────────────────────
+//
+// Used only when settlement_chain = 'starknet'.
+// Deployed on Eth Sepolia. Runs the KZG pairing check on L1, then calls
+// IStarknetMessaging.sendMessageToL2() to relay the result to Cairo.
+//
+// verifyAndBridge() is payable — msg.value covers the L1→L2 messaging fee.
+// Query StarkNet core estimateMessageFee() before calling to get the fee amount.
+// SETTLER_STARKNET_BRIDGE_FEE_WEI sets the default fee in the settler config.
+sol!(
+    #[allow(missing_docs)]
+    #[sol(rpc)]
+    InferenceBridge,
+    r#"[
+        {
+            "type": "function",
+            "name": "verifyAndBridge",
+            "inputs": [
+                { "name": "proof",        "type": "bytes",     "internalType": "bytes" },
+                { "name": "publicInputs", "type": "uint256[]", "internalType": "uint256[]" },
+                { "name": "inferenceId",  "type": "bytes32",   "internalType": "bytes32" },
+                { "name": "modelHash",    "type": "bytes32",   "internalType": "bytes32" }
+            ],
+            "outputs": [],
+            "stateMutability": "payable"
+        },
+        {
+            "type": "function",
+            "name": "isVerified",
+            "inputs": [
+                { "name": "inferenceId", "type": "bytes32", "internalType": "bytes32" }
+            ],
+            "outputs": [
+                { "name": "", "type": "bool", "internalType": "bool" }
+            ],
+            "stateMutability": "view"
+        },
+        {
+            "type": "event",
+            "name": "InferenceVerified",
+            "inputs": [
+                { "name": "inferenceId", "type": "bytes32", "indexed": true },
+                { "name": "submitter",   "type": "address", "indexed": true },
+                { "name": "modelHash",   "type": "bytes32", "indexed": false },
+                { "name": "timestamp",   "type": "uint256", "indexed": false }
+            ],
+            "anonymous": false
+        },
+        {
+            "type": "event",
+            "name": "MessageSentToStarkNet",
+            "inputs": [
+                { "name": "inferenceId", "type": "bytes32", "indexed": true },
+                { "name": "msgHash",     "type": "bytes32", "indexed": false },
+                { "name": "nonce",       "type": "uint256", "indexed": false }
+            ],
+            "anonymous": false
+        }
+    ]"#
+);
+
+// ── ParsedProof ───────────────────────────────────────────────────────────────
+
 /// Parsed contents of an EZKL proof.json file.
 #[derive(Debug, Clone)]
 pub struct ParsedProof {
-    /// Raw proof bytes to pass to submitProof()
+    /// Raw proof bytes — passed to submitProof() or verifyAndBridge()
     pub proof: Vec<u8>,
     /// Public instances (model outputs as field elements)
     pub instances: Vec<alloy::primitives::U256>,
@@ -156,9 +224,7 @@ impl ParsedProof {
                 v.as_u64()
                     .map(|n| n as u8)
                     .ok_or_else(|| {
-                        SettlerError::ProofParseError(
-                            format!("proof byte not a number: {v}")
-                        )
+                        SettlerError::ProofParseError(format!("proof byte not a number: {v}"))
                     })
             })
             .collect::<Result<Vec<u8>, _>>()?;
@@ -178,7 +244,6 @@ impl ParsedProof {
                 let s = v.as_str().unwrap_or_default();
                 let s = s.trim_start_matches("0x");
 
-                // Parse hex string into bytes
                 let mut bytes = (0..s.len())
                     .step_by(2)
                     .map(|i| {
@@ -192,9 +257,9 @@ impl ParsedProof {
 
                 alloy::primitives::U256::from_be_slice(&bytes)
                     .try_into()
-                    .map_err(|_| SettlerError::ProofParseError(
-                        "U256 conversion failed".into()
-                    ))
+                    .map_err(|_| {
+                        SettlerError::ProofParseError("U256 conversion failed".into())
+                    })
             })
             .collect::<Result<Vec<_>, _>>()?;
 

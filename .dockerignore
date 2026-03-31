@@ -1,0 +1,11 @@
+target/
+node_modules/
+mugen-ui/
+sdk/
+.env
+.env.*
+*.log
+.git/
+.gitignore
+prover/.venv/
+prover/artifacts/*.key
