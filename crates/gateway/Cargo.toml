@@ -30,4 +30,4 @@ sha2               = "0.10"
 hex-literal        = "0.4"
 base64  = "0.22"
 bytes   = "1"
-
+actix-cors = "0.7"

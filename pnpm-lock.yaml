@@ -11,7 +11,7 @@ importers:
   mugen-ui:
     dependencies:
       '@mugen/sdk':
-        specifier: file:../sdk
+        specifier: workspace:*
         version: link:../sdk
       react:
         specifier: ^18.3.0
