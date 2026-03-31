@@ -34,3 +34,7 @@ prover/artifacts/
 # OS
 .DS_Storepnpm-lock.yaml
 package-lock.json
+
+# Proving keys — too large for git (500MB+)
+prover/artifacts/pk.key
+prover/artifacts-aggr/pk.key
