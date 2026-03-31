@@ -13,8 +13,10 @@
 
 use std::sync::Arc;
 
+use actix_cors::Cors;
 use actix_web::{
     get, post,
+    http::header,
     web::{Data, Json, Path},
     App, HttpResponse, HttpServer, Responder,
 };
@@ -74,7 +76,6 @@ struct SubmitRequest {
     input_data: Vec<Vec<f64>>,
     #[serde(default = "default_model_id")]
     model_id: String,
-
 }
 
 fn default_model_id() -> String {
@@ -97,7 +98,6 @@ struct JobStatusResponse {
     tx_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
-
 }
 
 #[derive(Debug, Serialize)]
@@ -205,8 +205,6 @@ fn hash_input(input_data: &[Vec<f64>]) -> String {
 
 /// Spawned after job submission. Tracks the job through its full lifecycle
 /// and persists every state transition to Postgres.
-///
-
 fn spawn_settler(
     state:            AppState,
     job_id:           String,
@@ -233,7 +231,7 @@ fn spawn_settler(
         )
         .await;
 
-        // Poll prover-manager until Done or Failed — unchanged
+        // Poll prover-manager until Done or Failed
         let proof_path = {
             let mut attempts = 0u32;
             loop {
@@ -290,7 +288,7 @@ fn spawn_settler(
             }
         };
 
-        // Mark proof done in Postgres — unchanged
+        // Mark proof done in Postgres
         let _ = repo::update_job(
             &state.pool,
             db_job_id,
@@ -316,7 +314,6 @@ fn spawn_settler(
         let input_bytes  = serde_json::to_vec(&input_data).unwrap_or_default();
         let output_bytes = job_id.as_bytes().to_vec();
 
-        // Single call to settler.submit() — routes internally based on
         match state
             .settler
             .submit(
@@ -389,12 +386,6 @@ fn spawn_settler(
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 /// POST /v1/models
-///
-/// Full model registration pipeline:
-///   1. Decode base64 artifact bytes
-///   2. Pin artifact to IPFS via Pinata → CID
-///   3. Call settler.register_model() → on-chain tx hash
-///   4. Upsert model row in Postgres with CID + tx hash
 #[post("/v1/models")]
 async fn register_model(
     state: Data<AppState>,
@@ -684,9 +675,6 @@ async fn get_job_status(state: Data<AppState>, path: Path<String>) -> impl Respo
         }
     };
 
-    // Always try Postgres first — it has tx_hash once settled.
-    // Only fall back to in-memory when Postgres has no record yet (queued/running
-    // before the first DB write completes).
     if let Ok(job) = repo::find_job(&state.pool, db_id).await {
         return HttpResponse::Ok().json(JobStatusResponse {
             job_id:     job_id_str,
@@ -697,7 +685,6 @@ async fn get_job_status(state: Data<AppState>, path: Path<String>) -> impl Respo
         });
     }
 
-    // Postgres has no record yet — fall back to in-memory prover manager
     match state.manager.status(&job_id_str).await {
         Ok(job_state) => {
             let response = match job_state {
@@ -723,7 +710,6 @@ async fn get_job_status(state: Data<AppState>, path: Path<String>) -> impl Respo
         Err(_) => HttpResponse::NotFound().json(err(format!("job not found: {job_id_str}"))),
     }
 }
-
 
 /// GET /v1/jobs/{id}/proof
 #[get("/v1/jobs/{id}/proof")]
@@ -788,6 +774,9 @@ async fn main() -> std::io::Result<()> {
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(8080);
 
+    let client_url = std::env::var("CLIENT_URL")
+        .unwrap_or_else(|_| "http://localhost:5173".into());
+
     // ── Database pool ─────────────────────────────────────────────────────────
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let pool = common::db::build_pool(&database_url).expect("failed to build DB pool");
@@ -802,8 +791,6 @@ async fn main() -> std::io::Result<()> {
     let manager = Arc::new(ProverManager::new(prover_config()));
 
     // ── Settler ───────────────────────────────────────────────────────────────
-    // SettlerConfig::from_env() loads ALL chain config (eth-sepolia, base-sepolia,
-    // starknet) in a single pass. No separate ChainConfig needed.
     let (settler, settle_enabled) = match SettlerConfig::from_env() {
         Ok(cfg) => {
             info!(
@@ -815,9 +802,6 @@ async fn main() -> std::io::Result<()> {
         }
         Err(e) => {
             warn!("settlement disabled ({e}) — set SETTLER_* env vars to enable");
-            // Dummy config — all required fields preserved, new fields default to empty.
-            // Base-sepolia and starknet paths will return ConfigError if attempted
-            // while settle_enabled = false, which is gated above in spawn_settler.
             let dummy_cfg = SettlerConfig {
                 rpc_url:          "http://localhost:8545".into(),
                 private_key:      "0x0000000000000000000000000000000000000000000000000000000000000001".into(),
@@ -855,12 +839,18 @@ async fn main() -> std::io::Result<()> {
         pool,
         settle_enabled,
         ipfs_client,
-        // No chain_cfg — SettlerConfig owns all per-chain config
     });
 
     HttpServer::new(move || {
+        let cors = Cors::default()
+            .allowed_origin(&client_url)
+            .allowed_methods(vec!["GET", "POST", "OPTIONS"])
+            .allowed_headers(vec![header::CONTENT_TYPE, header::AUTHORIZATION])
+            .max_age(3600);
+
         App::new()
             .app_data(state.clone())
+            .wrap(cors)
             .wrap(actix_web::middleware::Logger::default())
             .service(healthz)
             .service(register_model)
