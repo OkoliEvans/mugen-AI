@@ -2,39 +2,31 @@
   "name": "@mugen/sdk",
   "version": "0.1.0",
   "description": "TypeScript SDK for the Mugen Verifiable Inference Network",
-  "main": "dist/index.js",
-  "module": "dist/index.mjs",
-  "types": "dist/index.d.ts",
+  "type": "module",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "types": "./src/index.ts",
+      "import": "./src/index.ts",
+      "development": "./src/index.ts",
+      "default": "./dist/index.mjs"
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "scripts": {
     "build": "tsup src/index.ts --format cjs,esm --dts --clean",
-    "dev": "tsc --watch",
+    "dev": "tsup src/index.ts --format esm --watch",
     "test": "jest --runInBand --config jest.config.js",
-    "test:watch": "jest --watch",
     "lint": "eslint src --ext .ts",
-    "e2e": "tsx src/e2e_verify.ts",
     "clean": "rm -rf dist"
   },
-  "keywords": [
-    "zkml",
-    "zk",
-    "inference",
-    "verifiable",
-    "mugen",
-    "web3"
-  ],
-  "license": "MIT",
   "dependencies": {
-    "axios": "1.13.6",
+    "axios": "^1.6.0",
     "ws": "^8.16.0"
   },
   "devDependencies": {
@@ -49,8 +41,5 @@
     "tsup": "^8.5.1",
     "tsx": "^4.21.0",
     "typescript": "^5.4.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
   }
 }
