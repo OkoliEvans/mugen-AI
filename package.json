@@ -1,7 +1,9 @@
 {
-  "name": "mugen",
+  "name": "mugen-monorepo",
   "private": true,
-  "pnpm": {
-    "ignoredBuiltDependencies": ["ts-node"]
+  "scripts": {
+    "build:sdk": "pnpm --filter @mugen/sdk build",
+    "build:ui": "pnpm --filter mugen-ui build",
+    "build": "pnpm build:sdk && pnpm build:ui"
   }
 }
