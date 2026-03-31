@@ -45,7 +45,7 @@ Model Registration (once per model)
     ├── POST /v1/models → Pinata IPFS → CID
     └── InferenceVerifier.sol.registerModel(modelId, ipfsCid, inputShapeHash)
 
-Client (SDK)
+Client (@mugen/sdk)
     │
     ▼
 Mugen Gateway  (Rust / Actix-web)
@@ -85,12 +85,11 @@ crates/
 
 contracts/
 ├── evm/
-│   ├── InferenceVerifier.sol   — on-chain proof registry
-│   ├── InferenceBridge.sol     — KZG verifier + L1→L2 relay
-│   └── script/Deploy.s.sol     — Foundry deployment script
+│   ├── src/InferenceVerifier.sol   — on-chain proof registry + model registry
+│   ├── src/InferenceBridge.sol     — KZG verifier + L1→L2 relay
+│   └── script/Deploy.s.sol         — Foundry deployment script
 └── starknet_l2/
-    └── src/
-        └── inference_verifier.cairo  — settlement consumer
+    └── src/inference_verifier.cairo — settlement consumer
 
 sdk/
 └── src/
@@ -99,6 +98,8 @@ sdk/
     ├── poller.ts   — job polling loop
     └── http.ts     — Axios wrapper with retry
 ```
+
+---
 
 ## Model Registry & IPFS
 
@@ -110,14 +111,14 @@ Before a model can be used for inference, it must be registered. Registration do
 |---|---|---|
 | Model artifact | `.onnx` | The ONNX model file, base64-decoded from the registration request |
 
-The file is pinned via the Pinata v2 API (`/pinning/pinFileToIPFS`) and returns a content-addressed CID (e.g. `QmXyz...` or `bafy...`). The CID is permanent — the same bytes always produce the same CID regardless of where they are pinned.
+The file is pinned via the Pinata v2 API and returns a content-addressed CID (e.g. `QmXyz...`). The same bytes always produce the same CID regardless of where they are pinned.
 
 **What gets stored on-chain (`InferenceVerifier.sol`):**
 
 | Field | Value |
 |---|---|
 | `modelId` | `keccak256(abi.encodePacked(name, version))` |
-| `ipfsCid` | The Pinata CID string |
+| `ipfsCidHash` | `keccak256(ipfsCid)` |
 | `inputShapeHash` | `keccak256(abi_encode(uint256[]))` of the input dimensions |
 
 The `modelId` is the binding key between the IPFS artifact and the ZK circuit. When EZKL generates a proof, it commits to this same `modelId` as a public input — so the on-chain verifier can confirm not just that _a_ valid inference was run, but that it was run on the _specific registered model_ at the _specific IPFS CID_.
@@ -140,13 +141,14 @@ https://<PINATA_GATEWAY_URL>/ipfs/<CID>
 
 **Required env vars for IPFS:**
 ```dotenv
-PINATA_JWT=eyJ...              # Pinata v2 JWT (Admin or pinFileToIPFS scope)
+PINATA_JWT=eyJ...
 PINATA_GATEWAY_URL=<your-gateway>.mypinata.cloud
 ```
 
-If `PINATA_JWT` is not set, `POST /v1/models` returns `503` — inference jobs can still run against models that were previously registered, but new model registration is unavailable.
+If `PINATA_JWT` is not set, `POST /v1/models` returns `503`. Inference jobs can still run against previously registered models.
 
 ---
+
 ## Deployed Contracts
 
 ### Ethereum Sepolia
@@ -195,7 +197,7 @@ const result = await client.verifyInference({
 });
 
 console.log(result.txHash);           // Eth Sepolia tx hash
-console.log(result.attestationHash);  // keccak256-derived proof fingerprint
+console.log(result.attestationHash);  // proof-derived fingerprint
 console.log(result.elapsedMs);        // total wall time including StarkNet relay
 ```
 
@@ -203,7 +205,7 @@ console.log(result.elapsedMs);        // total wall time including StarkNet rela
 
 ```bash
 cd sdk
-GATEWAY_URL=http://localhost:8080 TIMEOUT_MS=300000 npx tsx e2e_verify.ts
+GATEWAY_URL=http://localhost:8080 TIMEOUT_MS=300000 npm run e2e
 ```
 
 Expected output:
@@ -253,10 +255,9 @@ Poll job status.
 **Response (settled):**
 ```json
 {
-  "job_id":     "550e8400-e29b-41d4-a716-446655440000",
-  "status":     "settled",
-  "tx_hash":    "0x9a6c10bed212d03dac524252aeaf7605cb960721b6a7a3afab462cad330ca81d",
-  "proof_path": "prover/artifacts/550e8400.../proof.json"
+  "job_id":  "550e8400-e29b-41d4-a716-446655440000",
+  "status":  "settled",
+  "tx_hash": "0x9a6c10bed212d03dac524252aeaf7605cb960721b6a7a3afab462cad330ca81d"
 }
 ```
 
@@ -316,8 +317,7 @@ Register a model with IPFS pinning and on-chain registration.
 - Python 3.9+ with EZKL installed
 - PostgreSQL
 - Foundry (`forge`, `cast`)
-- `sncast` (StarkNet Foundry)
-- `starkli`
+- Starknet Foundry (`sncast`)
 
 ### 1. Environment
 
@@ -334,7 +334,7 @@ ARTIFACTS_DIR=prover/artifacts
 MAX_CONCURRENT=2
 TIMEOUT_SECS=120
 
-# Settler — must point to Eth Sepolia
+# Settler
 SETTLER_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
 SETTLER_PRIVATE_KEY=0x...
 INFERENCE_VERIFIER_ADDRESS=0x37c5c1E314d2d895Dce71d2fbDBB49DDA74c8699
@@ -347,7 +347,7 @@ STARKNET_POLL_INTERVAL_SECS=15
 STARKNET_MAX_POLL_ATTEMPTS=24
 SETTLER_STARKNET_BRIDGE_FEE_WEI=30000000000000000
 
-# IPFS — required for POST /v1/models
+# IPFS
 PINATA_JWT=eyJ...
 PINATA_GATEWAY_URL=<your-gateway>.mypinata.cloud
 ```
@@ -371,27 +371,29 @@ cargo build --release
 **StarkNet — declare and deploy `InferenceVerifier.cairo`:**
 
 ```bash
-cd starknet_l2
+cd contracts/starknet_l2
 scarb build
 
 sncast --account <account> declare \
   --url $STARKNET_RPC \
   --contract-name InferenceVerifier
 
-# Deploy — use 0x0 as placeholder for L1 bridge, whitelist after EVM deploy
+# Deploy with owner address and placeholder L1 bridge (whitelist after EVM deploy)
 sncast --account <account> deploy \
   --url $STARKNET_RPC \
   --class-hash <CLASS_HASH> \
-  --arguments '<OWNER_ADDRESS>, 0x0'
+  --constructor-calldata <OWNER_ADDRESS> 0x0
 ```
 
 **EVM — deploy `InferenceBridge.sol`:**
 
 ```bash
+cd contracts/evm
+
 export HALO2_VERIFIER_ADDRESS=0x7bcf4980868bA06A38AC561904aE6BDEd9Ee46D2
 export STARKNET_CORE_ADDRESS=0xE2Bb56ee936fd6433DC0F6e7e3b8365C906AA057
 export CAIRO_DEST=$(python3 -c "print(int('<CAIRO_ADDR_WITHOUT_0x>', 16))")
-export CAIRO_SELECTOR=$(starkli selector consume_inference_result)
+export CAIRO_SELECTOR=$(python3 -c "from starknet_py.hash.selector import get_selector_from_name; print(get_selector_from_name('consume_inference_result'))")
 
 forge script script/Deploy.s.sol:Deploy \
   --sig "deployBridge()" \
@@ -407,12 +409,10 @@ forge script script/Deploy.s.sol:Deploy \
 ```bash
 sncast --account <account> invoke \
   --url $STARKNET_RPC \
-  --contract-address <INFERENCE_VERIFIER_CAIRO_ADDRESS> \
+  --contract-address <CAIRO_CONTRACT_ADDRESS> \
   --function add_l1_verifier \
-  --calldata $(python3 -c "print(int('<BRIDGE_ADDRESS_WITHOUT_0x>', 16))")
+  --calldata <INFERENCE_BRIDGE_ADDRESS_AS_FELT252>
 ```
-
-Or invoke directly via Voyager — pass the ETH address in the `add_l1_verifier` field.
 
 ---
 
