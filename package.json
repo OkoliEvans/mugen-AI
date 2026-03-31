@@ -1,0 +1,7 @@
+{
+  "name": "mugen",
+  "private": true,
+  "pnpm": {
+    "ignoredBuiltDependencies": ["ts-node"]
+  }
+}
