@@ -11,8 +11,8 @@ importers:
   mugen-ui:
     dependencies:
       '@mugen-ai/sdk':
-        specifier: ^0.1.0
-        version: 0.1.0
+        specifier: 0.1.1
+        version: 0.1.1
       react:
         specifier: ^18.3.0
         version: 18.3.1
@@ -683,8 +683,8 @@ packages:
   '@jridgewell/trace-mapping@0.3.9':
     resolution: {integrity: sha512-3Belt6tdc8bPgAtbcmdtNJlirVoTmEb5e2gC94PnkwEW9jI6CAHUeoG85tjWP5WquqfavoMtMwiG4P926ZKKuQ==}
 
-  '@mugen-ai/sdk@0.1.0':
-    resolution: {integrity: sha512-PeyFETB05Zt1JgSCWOKehL65ox+SoiSKasiQ9njtSitll3LPufzb/wX86MllywJQjs0FpqPXtWGgC0fLzhqi/A==}
+  '@mugen-ai/sdk@0.1.1':
+    resolution: {integrity: sha512-bpPgCX+tPNCKLZA9X3qPwfkPtYWYv6cfwDZ+FQmxlYGjvNu+H433b3qwh9SE0qcy1UjPtz+xJV2K+N8EGh66DA==}
 
   '@nodelib/fs.scandir@2.1.5':
     resolution: {integrity: sha512-vq24Bq3ym5HEQm2NKCr3yXDwjc7vTsEThRDnkp2DK9p1uqLR+DHurm/NOTo0KG7HYHU7eppKZj3MyqYuMBf62g==}
@@ -3016,7 +3016,7 @@ snapshots:
       '@jridgewell/sourcemap-codec': 1.5.5
     optional: true
 
-  '@mugen-ai/sdk@0.1.0':
+  '@mugen-ai/sdk@0.1.1':
     dependencies:
       axios: 1.13.6
       ws: 8.20.0
