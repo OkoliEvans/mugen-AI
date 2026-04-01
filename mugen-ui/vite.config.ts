@@ -5,21 +5,6 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     preserveSymlinks: true,
-    conditions: ['import', 'module', 'browser', 'default'],
-  },
-  optimizeDeps: {
-    include: [
-      '@mugen-ai/sdk',
-      'axios',
-      'react',
-      'react-dom',
-      'scheduler',
-    ],
-  },
-  build: {
-    commonjsOptions: {
-      include: [/@mugen-ai\/sdk/, /axios/, /node_modules/],
-    },
   },
   server: {
     port: 3000,
