@@ -309,6 +309,22 @@ Register a model with IPFS pinning and on-chain registration.
 
 ---
 
+## Production Notes
+
+### Live Inference on the Hosted Demo
+
+The hosted gateway at the demo UI may not successfully complete proof generation due to resource constraints on the current deployment tier. Generating a Halo2 KZG proof is computationally intensive — even for small models, the prover requires significant RAM and CPU time.
+
+If inference fails on the live demo, clone the repo and run the gateway locally following the [Deployment Guide](#deployment-guide) below.
+
+### Model Scale
+
+`tiny_mlp_v1` is a minimal 4-input MLP used for MVP demonstration only. It exists to validate the full pipeline end-to-end: inference → ZK proof → on-chain verification → StarkNet attestation.
+
+In production, Mugen is designed to run industry-scale models — ResNet-18, MobileNet, and equivalent architectures. These models have significantly larger circuit parameters (`k ≥ 21`), proof generation times measured in minutes, and proving keys in the gigabyte range. The architecture scales to accommodate them: the prover runs as a dedicated service, artifacts are stored in object storage, and the gateway remains a lightweight orchestration layer.
+
+---
+
 ## Deployment Guide
 
 ### Prerequisites
