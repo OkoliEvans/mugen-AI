@@ -8,7 +8,13 @@ export default defineConfig({
     conditions: ['import', 'module', 'browser', 'default'],
   },
   optimizeDeps: {
-    include: ['@mugen-ai/sdk', 'axios'],
+    include: [
+      '@mugen-ai/sdk',
+      'axios',
+      'react',
+      'react-dom',
+      'scheduler',
+    ],
   },
   build: {
     commonjsOptions: {
