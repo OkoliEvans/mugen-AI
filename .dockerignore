@@ -8,4 +8,4 @@ sdk/
 .git/
 .gitignore
 prover/.venv/
-prover/artifacts/*.key
+prover/artifacts/

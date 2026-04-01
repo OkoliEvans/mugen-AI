@@ -19,7 +19,6 @@ FROM --platform=linux/amd64 debian:bookworm-slim AS runner
 
 WORKDIR /app
 
-# Add libpq5 to the runtime stage
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
@@ -27,13 +26,17 @@ RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
     python3-venv \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy binary
 COPY --from=builder /app/target/release/gateway /app/gateway
 
-# Copy prover worker
+# Copy prover worker (excluding artifacts — fetched at runtime from R2)
 COPY prover /app/prover
+
+# Make fetch script executable
+RUN chmod +x /app/prover/fetch_artifacts.sh
 
 # Setup Python environment for ezkl
 RUN python3 -m venv /app/prover/.venv && \
@@ -48,4 +51,4 @@ ENV PORT=8080
 
 EXPOSE 8080
 
-CMD ["/app/gateway"]
+CMD ["/bin/sh", "-c", "/app/prover/fetch_artifacts.sh && /app/gateway"]

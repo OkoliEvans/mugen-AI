@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react'
-import { ElenxisClient, VerifyResult } from '@mugen/sdk'
+import { ElenxisClient, VerifyResult } from '@mugen-ai/sdk'
 import type { JobRecord } from '../hooks/useGateway'
 import styles from './InferencePanel.module.css'
 

@@ -4,8 +4,8 @@ import InferencePanel from "./components/InferencePanel";
 import JobHistory from "./components/JobHistory";
 import styles from "./App.module.css";
 
-const INSTALL_CMD = "npm install @mugen/sdk";
-const USAGE_SNIPPET = `import { ElenxisClient } from '@mugen/sdk'
+const INSTALL_CMD = "npm install @mugen-ai/sdk";
+const USAGE_SNIPPET = `import { ElenxisClient } from '@mugen-ai/sdk'
 
 const client = new ElenxisClient({
   gatewayUrl: 'https://your-gateway.xyz',
@@ -178,11 +178,11 @@ export default function App() {
         <span>MIT License</span>
         <span className={styles.footerDot}>·</span>
         <a
-          href="https://www.npmjs.com/package/@mugen/sdk"
+          href="https://www.npmjs.com/package/@mugen-ai/sdk"
           target="_blank"
           rel="noreferrer"
         >
-          @mugen/sdk ↗
+          @mugen-ai/sdk ↗
         </a>
       </footer>
     </div>
