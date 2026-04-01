@@ -1,18 +1,17 @@
 {
   "name": "@mugen-ai/sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript SDK for the Mugen Verifiable Inference Network",
   "type": "module",
-  "main": "./src/index.ts",
-  "module": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js",
-      "development": "./src/index.ts",
-      "default": "./dist/index.mjs"
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "default": "./dist/index.js"
     }
   },
   "publishConfig": {
@@ -25,7 +24,7 @@
   ],
   "scripts": {
     "build": "tsup src/index.ts --format cjs,esm --dts --clean",
-    "dev": "tsup src/index.ts --format esm --watch",
+    "dev": "tsup src/index.ts --format esm --dts --watch",
     "test": "jest --runInBand --config jest.config.js",
     "lint": "eslint src --ext .ts",
     "clean": "rm -rf dist"
