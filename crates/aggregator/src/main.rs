@@ -10,15 +10,15 @@
 //!   aggregator task — receives batches, calls Python aggregator worker
 //!   settler         — submits aggregated proof on-chain
 
-mod config;
-mod collector;
 mod batch;
+mod collector;
+mod config;
 mod error;
 
+use anyhow;
 use std::sync::Arc;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
-use anyhow;
 
 use common::{db, DbPool};
 use config::AggregatorConfig;
@@ -27,22 +27,23 @@ use config::AggregatorConfig;
 async fn main() -> anyhow::Result<()> {
     // Load workspace root .env
     let env_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap()
-        .parent().unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
         .join(".env");
     let _ = dotenvy::from_path(&env_path);
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
     let cfg = AggregatorConfig::from_env()?;
 
     info!(
-        batch_size     = cfg.batch_size,
+        batch_size = cfg.batch_size,
         flush_interval = cfg.flush_interval_secs,
         "Elenxis Aggregator starting"
     );

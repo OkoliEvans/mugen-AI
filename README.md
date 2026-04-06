@@ -1,4 +1,5 @@
 # Mugen
+## VEIL — Verifiable Execution and Inference Layer
 
 **Verifiable Inference Network**
 

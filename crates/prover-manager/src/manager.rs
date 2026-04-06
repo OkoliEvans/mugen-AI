@@ -1,165 +1,276 @@
-use crate::error::ProverError;
-use crate::job::{JobRecord, JobState, ProveJob};
-use crate::worker::run_worker;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::{Mutex, Semaphore};
-use tracing::{info, instrument};
+use std::{collections::HashMap, sync::Arc};
+
+use anyhow::{anyhow, Result};
+use tokio::sync::Mutex;
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
-/// Configuration for the ProverManager
+use crate::job::{JobState, ProofData};
+use crate::proving;
+
 #[derive(Debug, Clone)]
 pub struct ProverConfig {
-    /// Path to the Python binary (e.g. "python3" or "/path/to/.venv/bin/python3")
-    pub python_bin: String,
-    /// Path to worker.py
-    pub worker_script: String,
-    /// Path to the artifacts directory (model.compiled, pk.key, vk.key)
-    pub artifacts_dir: String,
-    /// Max concurrent proof jobs (each job spawns one Python process)
+    pub proofs_dir: String,
     pub max_concurrent: usize,
-    /// Per-job timeout in seconds
+    /// Wall-clock timeout for the full two-phase pipeline.
+    /// Should be >= 180s (compressed ~60s + Groth16 ~120s).
     pub timeout_secs: u64,
+    pub guest_elf_path: String,
+    pub weights_path: String,
+    /// How long Done/Failed entries live in memory before eviction.
+    /// In-flight jobs are never evicted. Recommended: 3600s.
+    pub job_ttl_secs: u64,
 }
 
-impl Default for ProverConfig {
-    fn default() -> Self {
-        Self {
-            python_bin: "python3".into(),
-            worker_script: "./prover/worker.py".into(),
-            artifacts_dir: "./prover/artifacts".into(),
-            max_concurrent: 4,
-            timeout_secs: 60,
-        }
-    }
-}
+type JobMap = Arc<Mutex<HashMap<String, JobState>>>;
+type ProofMap = Arc<Mutex<HashMap<String, ProofData>>>;
+type EvictMap = Arc<Mutex<HashMap<String, std::time::Instant>>>;
 
-/// Thread-safe prover manager.
-/// Clone freely — all clones share the same state.
-#[derive(Clone)]
 pub struct ProverManager {
     config: ProverConfig,
-    semaphore: Arc<Semaphore>,
-    jobs: Arc<Mutex<HashMap<String, JobRecord>>>,
+    jobs: JobMap,
+    proofs: ProofMap,
+    evict: EvictMap,
+    semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl ProverManager {
-    pub fn new(config: ProverConfig) -> Self {
-        let semaphore = Arc::new(Semaphore::new(config.max_concurrent));
-        Self {
+    pub fn new(config: ProverConfig) -> Arc<Self> {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_concurrent));
+
+        let mgr = Arc::new(Self {
             config,
-            semaphore,
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            proofs: Arc::new(Mutex::new(HashMap::new())),
+            evict: Arc::new(Mutex::new(HashMap::new())),
+            semaphore,
+        });
+
+        // Background TTL eviction — sweeps every 60s.
+        // Only removes Done/Failed entries; in-flight jobs are never touched.
+        {
+            let jobs = Arc::clone(&mgr.jobs);
+            let proofs = Arc::clone(&mgr.proofs);
+            let evict = Arc::clone(&mgr.evict);
+            let ttl = mgr.config.job_ttl_secs;
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    let now = std::time::Instant::now();
+                    let mut ev = evict.lock().await;
+                    let expired: Vec<String> = ev
+                        .iter()
+                        .filter(|(_, ts)| now.duration_since(**ts).as_secs() >= ttl)
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    for id in &expired {
+                        ev.remove(id);
+                        jobs.lock().await.remove(id);
+                        proofs.lock().await.remove(id);
+                        info!(%id, "job evicted after TTL");
+                    }
+                }
+            });
         }
+
+        mgr
     }
 
-    /// Submit a proof job. Returns the job_id immediately.
-    /// The job runs in the background — poll `status()` to track it.
-    #[instrument(skip(self, input_data))]
-    pub async fn submit(&self, input_data: Vec<Vec<f64>>) -> Result<String, ProverError> {
+    /// Submit a job. Returns the job_id immediately.
+    ///
+    /// Spawns a background task bounded by config.timeout_secs:
+    ///   Phase 1 (compressed) -> JobState::Compressed  — attestation_hash available
+    ///   Phase 2 (groth16)    -> JobState::Done        — proof written, ready for settlement
+    ///
+    /// On phase 2 failure the job is left in Compressed state (not Failed) so
+    /// the gateway can still read the attestation_hash from phase 1.
+    pub async fn submit(&self, input_data: Vec<Vec<f64>>) -> Result<String> {
         let job_id = Uuid::new_v4().to_string();
+        let config = self.config.clone();
+        let jobs = Arc::clone(&self.jobs);
+        let proofs = Arc::clone(&self.proofs);
+        let evict = Arc::clone(&self.evict);
+        let sem = Arc::clone(&self.semaphore);
+        let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
 
-        // Register job as queued
-        {
-            let mut jobs = self.jobs.lock().await;
-            jobs.insert(job_id.clone(), JobRecord::new(job_id.clone()));
-        }
+        jobs.lock().await.insert(job_id.clone(), JobState::Queued);
+        info!(%job_id, "job queued");
 
-        info!(job_id = %job_id, "job queued");
-
-        // Spawn background task — does not block the caller
-        let manager = self.clone();
-        let jid = job_id.clone();
+        let job_id_bg = job_id.clone();
         tokio::spawn(async move {
-            manager.run_job(jid, input_data).await;
+            let result = tokio::time::timeout(timeout, async {
+                let _permit = sem.acquire().await.unwrap();
+
+                jobs.lock().await.insert(job_id_bg.clone(), JobState::Running);
+                info!(%job_id_bg, "job running — starting two-phase proving");
+
+                // ── Phase 1: Compressed proof ─────────────────────────────────
+                let phase1_result = proving::prove_compressed(
+                    &config,
+                    &job_id_bg,
+                    input_data.clone(),
+                )
+                .await;
+
+                let compressed_data = match phase1_result {
+                    Ok(data) => data,
+                    Err(e) => {
+                        error!(%job_id_bg, "phase 1 (compressed) failed: {e}");
+                        jobs.lock().await.insert(
+                            job_id_bg.clone(),
+                            JobState::Failed { reason: format!("compressed proof failed: {e}") },
+                        );
+                        evict.lock().await.insert(job_id_bg.clone(), std::time::Instant::now());
+                        return;
+                    }
+                };
+
+                let attestation_hash = compressed_data.attestation_hash;
+                jobs.lock().await.insert(
+                    job_id_bg.clone(),
+                    JobState::Compressed { attestation_hash },
+                );
+                info!(
+                    %job_id_bg,
+                    attestation_hash = %hex::encode(attestation_hash),
+                    "phase 1 complete — attestation_hash available"
+                );
+
+                // ── Phase 2: Groth16 ─────────────────────────────────────────
+                let phase2_result = proving::prove_groth16(
+                    &config,
+                    &job_id_bg,
+                    input_data,
+                )
+                .await;
+
+                let groth16_data = match phase2_result {
+                    Ok(data) => data,
+                    Err(e) => {
+                        error!(%job_id_bg, "phase 2 (groth16) failed: {e}");
+                        // Leave job in Compressed state — attestation_hash remains
+                        // valid and accessible to the gateway even when Groth16 fails.
+                        warn!(%job_id_bg, "job left in Compressed state — attestation_hash intact");
+                        evict.lock().await.insert(job_id_bg.clone(), std::time::Instant::now());
+                        return;
+                    }
+                };
+
+                // Sanity check: both phases must agree on attestation_hash.
+                if groth16_data.attestation_hash != attestation_hash {
+                    error!(
+                        %job_id_bg,
+                        compressed_hash = %hex::encode(attestation_hash),
+                        groth16_hash    = %hex::encode(groth16_data.attestation_hash),
+                        "attestation_hash mismatch between phases — ELF or weights changed"
+                    );
+                    jobs.lock().await.insert(
+                        job_id_bg.clone(),
+                        JobState::Failed {
+                            reason: "attestation_hash mismatch between compressed and groth16 phases".into(),
+                        },
+                    );
+                    evict.lock().await.insert(job_id_bg.clone(), std::time::Instant::now());
+                    return;
+                }
+
+                let proof_path = format!("{}/{}.bin", config.proofs_dir, job_id_bg);
+                if let Err(e) = tokio::fs::create_dir_all(&config.proofs_dir).await {
+                    error!(%job_id_bg, "failed to create proofs_dir: {e}");
+                    jobs.lock().await.insert(
+                        job_id_bg.clone(),
+                        JobState::Failed { reason: format!("proofs_dir creation failed: {e}") },
+                    );
+                    evict.lock().await.insert(job_id_bg.clone(), std::time::Instant::now());
+                    return;
+                }
+                if let Err(e) = tokio::fs::write(&proof_path, &groth16_data.proof_bytes).await {
+                    error!(%job_id_bg, "failed to write groth16 proof file: {e}");
+                    jobs.lock().await.insert(
+                        job_id_bg.clone(),
+                        JobState::Failed { reason: format!("proof write failed: {e}") },
+                    );
+                    evict.lock().await.insert(job_id_bg.clone(), std::time::Instant::now());
+                    return;
+                }
+
+                proofs.lock().await.insert(job_id_bg.clone(), groth16_data);
+                jobs.lock().await.insert(
+                    job_id_bg.clone(),
+                    JobState::Done { proof_path: proof_path.clone() },
+                );
+                evict.lock().await.insert(job_id_bg.clone(), std::time::Instant::now());
+                info!(%job_id_bg, %proof_path, "phase 2 complete — groth16 proof ready for settlement");
+            })
+            .await;
+
+            if result.is_err() {
+                error!(%job_id_bg, "job timed out");
+                jobs.lock().await.insert(
+                    job_id_bg.clone(),
+                    JobState::Failed {
+                        reason: "job timed out".into(),
+                    },
+                );
+                evict
+                    .lock()
+                    .await
+                    .insert(job_id_bg, std::time::Instant::now());
+            }
         });
 
         Ok(job_id)
     }
 
-    /// Internal: acquires semaphore slot, runs the worker, updates job state
-    async fn run_job(&self, job_id: String, input_data: Vec<Vec<f64>>) {
-        // Acquire concurrency slot — blocks here if max_concurrent is reached
-        let _permit = self.semaphore.acquire().await.expect("semaphore closed");
-
-        // Mark as running
-        {
-            let mut jobs = self.jobs.lock().await;
-            if let Some(record) = jobs.get_mut(&job_id) {
-                record.state = JobState::Running;
-            }
-        }
-
-        info!(job_id = %job_id, "job started");
-
-        let job = ProveJob {
-            job_id: job_id.clone(),
-            input_data,
-            artifacts_dir: self.config.artifacts_dir.clone(),
-        };
-
-        let result = run_worker(
-            &job,
-            &self.config.python_bin,
-            &self.config.worker_script,
-            self.config.timeout_secs,
-        )
-        .await;
-
-        // Update job state based on result
-        let mut jobs = self.jobs.lock().await;
-        if let Some(record) = jobs.get_mut(&job_id) {
-            match result {
-                Ok(worker_result) => {
-                    let proof_path = worker_result
-                        .proof_path
-                        .unwrap_or_else(|| format!("/tmp/{job_id}_proof.json"));
-                    info!(job_id = %job_id, proof_path = %proof_path, "job done");
-                    record.state = JobState::Done { proof_path };
-                }
-                Err(e) => {
-                    info!(job_id = %job_id, error = %e, "job failed");
-                    record.state = JobState::Failed {
-                        reason: e.to_string(),
-                    };
-                }
-            }
-        }
-        // _permit dropped here — releases concurrency slot
+    pub async fn status(&self, job_id: &str) -> Result<JobState> {
+        self.jobs
+            .lock()
+            .await
+            .get(job_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("job not found: {job_id}"))
     }
 
-    /// Get the current state of a job
-    pub async fn status(&self, job_id: &str) -> Result<JobState, ProverError> {
-        let jobs = self.jobs.lock().await;
-        jobs.get(job_id)
-            .map(|r| r.state.clone())
-            .ok_or_else(|| ProverError::JobNotFound(job_id.into()))
-    }
-
-    /// Read the proof bytes for a completed job.
-    /// Returns an error if the job is not done yet.
-    pub async fn read_proof(&self, job_id: &str) -> Result<Vec<u8>, ProverError> {
-        let state = self.status(job_id).await?;
-        match state {
-            JobState::Done { proof_path } => {
-                tokio::fs::read(&proof_path)
-                    .await
-                    .map_err(|_| ProverError::ProofNotFound(proof_path))
-            }
-            _ => Err(ProverError::JobNotFound(job_id.into())),
+    pub async fn read_proof(&self, job_id: &str) -> Result<Vec<u8>> {
+        match self.status(job_id).await? {
+            JobState::Done { proof_path } => tokio::fs::read(&proof_path)
+                .await
+                .map_err(|e| anyhow!("failed to read proof at {proof_path}: {e}")),
+            JobState::Compressed { .. } => Err(anyhow!(
+                "groth16 proof not yet ready — job is in Compressed state"
+            )),
+            _ => Err(anyhow!("proof not available — job is not in Done state")),
         }
     }
 
-    /// How many jobs are currently running
-    pub async fn running_count(&self) -> usize {
-        let jobs = self.jobs.lock().await;
-        jobs.values()
-            .filter(|r| r.state == JobState::Running)
-            .count()
+    pub async fn proof_data(&self, job_id: &str) -> Result<ProofData> {
+        self.proofs
+            .lock()
+            .await
+            .get(job_id)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!("proof data not found for job '{job_id}' — job may not be Done yet")
+            })
     }
 
-    /// How many slots are available right now
-    pub fn available_slots(&self) -> usize {
-        self.semaphore.available_permits()
+    pub async fn attestation_hash(&self, job_id: &str) -> Result<[u8; 32]> {
+        match self.status(job_id).await? {
+            JobState::Compressed { attestation_hash } => Ok(attestation_hash),
+            JobState::Done { .. } => self
+                .proofs
+                .lock()
+                .await
+                .get(job_id)
+                .map(|pd| pd.attestation_hash)
+                .ok_or_else(|| anyhow!("proof data missing for Done job '{job_id}'")),
+            JobState::Queued | JobState::Running => Err(anyhow!(
+                "attestation_hash not yet available — job is still proving"
+            )),
+            JobState::Failed { reason } => Err(anyhow!(
+                "job failed before attestation_hash was computed: {reason}"
+            )),
+        }
     }
 }

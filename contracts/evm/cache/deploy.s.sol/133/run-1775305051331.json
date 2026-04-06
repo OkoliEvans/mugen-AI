@@ -1,0 +1,19 @@
+{
+  "transactions": [
+    {
+      "rpc": "https://testnet.hsk.xyz"
+    },
+    {
+      "rpc": "https://testnet.hsk.xyz"
+    },
+    {
+      "rpc": "https://testnet.hsk.xyz"
+    },
+    {
+      "rpc": "https://testnet.hsk.xyz"
+    },
+    {
+      "rpc": "https://testnet.hsk.xyz"
+    }
+  ]
+}

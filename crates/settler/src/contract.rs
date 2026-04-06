@@ -212,8 +212,8 @@ impl ParsedProof {
         let raw = std::fs::read_to_string(path)
             .map_err(|_| SettlerError::ProofNotFound(path.to_string()))?;
 
-        let json: serde_json::Value = serde_json::from_str(&raw)
-            .map_err(|e| SettlerError::ProofParseError(e.to_string()))?;
+        let json: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| SettlerError::ProofParseError(e.to_string()))?;
 
         // proof is an array of u8 integers
         let proof = json["proof"]
@@ -221,11 +221,9 @@ impl ParsedProof {
             .ok_or_else(|| SettlerError::ProofParseError("missing 'proof' field".into()))?
             .iter()
             .map(|v| {
-                v.as_u64()
-                    .map(|n| n as u8)
-                    .ok_or_else(|| {
-                        SettlerError::ProofParseError(format!("proof byte not a number: {v}"))
-                    })
+                v.as_u64().map(|n| n as u8).ok_or_else(|| {
+                    SettlerError::ProofParseError(format!("proof byte not a number: {v}"))
+                })
             })
             .collect::<Result<Vec<u8>, _>>()?;
 
@@ -234,9 +232,7 @@ impl ParsedProof {
             .as_array()
             .and_then(|outer| outer.first())
             .and_then(|inner| inner.as_array())
-            .ok_or_else(|| {
-                SettlerError::ProofParseError("missing 'instances' field".into())
-            })?;
+            .ok_or_else(|| SettlerError::ProofParseError("missing 'instances' field".into()))?;
 
         let instances = instances_raw
             .iter()
@@ -257,9 +253,7 @@ impl ParsedProof {
 
                 alloy::primitives::U256::from_be_slice(&bytes)
                     .try_into()
-                    .map_err(|_| {
-                        SettlerError::ProofParseError("U256 conversion failed".into())
-                    })
+                    .map_err(|_| SettlerError::ProofParseError("U256 conversion failed".into()))
             })
             .collect::<Result<Vec<_>, _>>()?;
 

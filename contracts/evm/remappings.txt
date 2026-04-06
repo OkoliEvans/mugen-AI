@@ -1,5 +1,8 @@
 @openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/
+@sp1-contracts/=lib/sp1-contracts/contracts/src/
+forge-std/=lib/sp1-contracts/contracts/lib/forge-std/src/
+ds-test/=lib/sp1-contracts/contracts/lib/openzeppelin-contracts/lib/forge-std/lib/ds-test/src/
 erc4626-tests/=lib/openzeppelin-contracts/lib/erc4626-tests/
-forge-std/=lib/forge-std/src/
 halmos-cheatcodes/=lib/openzeppelin-contracts/lib/halmos-cheatcodes/src/
 openzeppelin-contracts/=lib/openzeppelin-contracts/
+sp1-contracts/=lib/sp1-contracts/contracts/src/

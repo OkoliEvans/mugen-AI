@@ -1,0 +1,25 @@
+[package]
+name = "veil-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "Rust SDK for the Mugen Veil verifiable inference network"
+license = "MIT"
+repository = "https://github.com/OkoliEvans/mugen-AI"
+keywords = ["zkml", "zk", "inference", "sp1", "mugen"]
+categories = ["api-bindings", "cryptography"]
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "e2e_verify"
+path = "src/e2e_verify.rs"

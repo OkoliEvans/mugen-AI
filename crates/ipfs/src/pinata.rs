@@ -55,8 +55,8 @@ pub struct PinMeta {
 /// Pinata IPFS client. Cheap to clone — wraps an Arc internally via reqwest.
 #[derive(Clone)]
 pub struct PinataClient {
-    http:        Client,
-    jwt:         String,
+    http: Client,
+    jwt: String,
     gateway_url: String,
 }
 
@@ -64,8 +64,8 @@ impl PinataClient {
     /// Construct from explicit values. Prefer [`PinataClient::from_env`] in production.
     pub fn new(jwt: impl Into<String>, gateway_url: impl Into<String>) -> Self {
         Self {
-            http:        Client::new(),
-            jwt:         jwt.into(),
+            http: Client::new(),
+            jwt: jwt.into(),
             gateway_url: gateway_url.into(),
         }
     }
@@ -96,12 +96,12 @@ impl PinataClient {
     /// Returns the IPFS CID string (e.g. `QmXyz...` or `bafy...`).
     pub async fn pin_bytes(
         &self,
-        data:     Bytes,
+        data: Bytes,
         filename: impl Into<String>,
-        meta:     Option<PinMeta>,
+        meta: Option<PinMeta>,
     ) -> Result<String, IpfsError> {
         let filename = filename.into();
-        let size     = data.len();
+        let size = data.len();
 
         debug!(filename, size, "pinning bytes to IPFS");
 
@@ -117,9 +117,7 @@ impl PinataClient {
             form = form.text("pinataMetadata", meta_json);
         }
 
-        let cid = self
-            .post_multipart("/pinning/pinFileToIPFS", form)
-            .await?;
+        let cid = self.post_multipart("/pinning/pinFileToIPFS", form).await?;
 
         info!(filename, %cid, size, "pinned bytes to IPFS");
         Ok(cid)
@@ -131,19 +129,19 @@ impl PinataClient {
     pub async fn pin_json<T: Serialize>(
         &self,
         value: &T,
-        meta:  Option<PinMeta>,
+        meta: Option<PinMeta>,
     ) -> Result<String, IpfsError> {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
         struct PinJsonRequest<'a, T: Serialize> {
             #[serde(rename = "pinataContent")]
-            pinata_content:  &'a T,
+            pinata_content: &'a T,
             #[serde(rename = "pinataMetadata", skip_serializing_if = "Option::is_none")]
             pinata_metadata: Option<&'a PinMeta>,
         }
 
         let body = PinJsonRequest {
-            pinata_content:  value,
+            pinata_content: value,
             pinata_metadata: meta.as_ref(),
         };
 
@@ -207,6 +205,9 @@ impl PinataClient {
             Err(_) => format!("HTTP {status_u16}"),
         };
 
-        Err(IpfsError::Api { status: status_u16, message })
+        Err(IpfsError::Api {
+            status: status_u16,
+            message,
+        })
     }
 }

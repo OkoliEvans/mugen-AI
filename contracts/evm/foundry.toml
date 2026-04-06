@@ -14,10 +14,6 @@ yul = true
 yulDetails.stackAllocation = true
 yulDetails.optimizerSteps = "dhfoDgvulfnTUtnIf"
 
-remappings = [
-    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
-]
-
 [profile.default.fuzz]
 runs = 1000
 

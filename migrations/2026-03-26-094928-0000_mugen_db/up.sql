@@ -1,10 +1,9 @@
--- Your SQL goes here
--- up.sql
+-- migrations/2026-04-03-000002_sp1_columns/up.sql
 -- Run: diesel migration run
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
--- ── models ───────────────────────────────────────────────────────────────────
+-- ── models ────────────────────────────────────────────────────────────────────
 CREATE TABLE models (
     id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     name            TEXT        NOT NULL,
@@ -33,12 +32,12 @@ CREATE TABLE batches (
 CREATE INDEX batches_status_idx  ON batches(status);
 CREATE INDEX batches_created_idx ON batches(created_at DESC);
 
--- ── jobs ─────────────────────────────────────────────────────────────────────
+-- ── jobs ──────────────────────────────────────────────────────────────────────
 CREATE TABLE jobs (
     id               UUID    PRIMARY KEY,
     model_id         UUID    NOT NULL REFERENCES models(id),
     status           TEXT    NOT NULL DEFAULT 'queued'
-                             CHECK (status IN ('queued','running','done','failed','settled')),
+                             CHECK (status IN ('queued','running','proving','done','failed','settled')),
     input_hash       TEXT    NOT NULL,
     proof_path       TEXT,
     error            TEXT,
@@ -47,9 +46,12 @@ CREATE TABLE jobs (
     completed_at     TIMESTAMPTZ,
     settled_at       TIMESTAMPTZ,
     tx_hash          TEXT,
-    batch_id         UUID    REFERENCES batches(id)
+    batch_id         UUID    REFERENCES batches(id),
+    attestation_hash TEXT,
+    proof_bytes      BYTEA
 );
 
-CREATE INDEX jobs_status_idx          ON jobs(status);
-CREATE INDEX jobs_batch_id_idx        ON jobs(batch_id);
-CREATE INDEX jobs_submitted_idx       ON jobs(submitted_at DESC);
+CREATE INDEX jobs_status_idx           ON jobs(status);
+CREATE INDEX jobs_batch_id_idx         ON jobs(batch_id);
+CREATE INDEX jobs_submitted_idx        ON jobs(submitted_at DESC);
+CREATE INDEX jobs_attestation_hash_idx ON jobs(attestation_hash);

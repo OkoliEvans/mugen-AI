@@ -1,7 +1,7 @@
 //! Database connection pool (deadpool-diesel + Postgres).
 
 use deadpool_diesel::postgres::{Manager, Pool};
-use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use tracing::info;
 
 use crate::error::CommonError;

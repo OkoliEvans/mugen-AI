@@ -12,14 +12,18 @@ use tracing::{error, info, warn};
 use common::{repo, DbPool};
 use settler::settler::Settler;
 
-use crate::{batch::{self, JobWithInput}, config::AggregatorConfig, error::AggregatorError};
+use crate::{
+    batch::{self, JobWithInput},
+    config::AggregatorConfig,
+    error::AggregatorError,
+};
 
 pub async fn run(
-    pool:    Arc<DbPool>,
+    pool: Arc<DbPool>,
     settler: Arc<Settler>,
-    cfg:     AggregatorConfig,
+    cfg: AggregatorConfig,
 ) -> Result<(), AggregatorError> {
-    let poll      = Duration::from_secs(cfg.poll_interval_secs);
+    let poll = Duration::from_secs(cfg.poll_interval_secs);
     let flush_dur = Duration::from_secs(cfg.flush_interval_secs);
     let mut last_flush = Instant::now();
 
@@ -52,13 +56,17 @@ pub async fn run(
         }
 
         let elapsed = last_flush.elapsed();
-        let should_flush_by_size  = jobs.len() >= cfg.batch_size;
+        let should_flush_by_size = jobs.len() >= cfg.batch_size;
         let should_flush_by_timer = elapsed >= flush_dur;
 
         if should_flush_by_size {
             info!(count = jobs.len(), "batch size reached — flushing");
         } else if should_flush_by_timer {
-            info!(count = jobs.len(), elapsed_secs = elapsed.as_secs(), "flush timer fired");
+            info!(
+                count = jobs.len(),
+                elapsed_secs = elapsed.as_secs(),
+                "flush timer fired"
+            );
         } else {
             continue;
         }
@@ -74,8 +82,8 @@ pub async fn run(
                 // Only include jobs that have a proof_path
                 j.proof_path.as_ref()?;
                 Some(JobWithInput {
-                    id:         j.id,
-                    input_data: vec![],  // aggregator.py reads proof directly
+                    id: j.id,
+                    input_data: vec![], // aggregator.py reads proof directly
                 })
             })
             .collect();
@@ -85,9 +93,9 @@ pub async fn run(
             continue;
         }
 
-        let pool_c    = Arc::clone(&pool);
+        let pool_c = Arc::clone(&pool);
         let settler_c = Arc::clone(&settler);
-        let cfg_c     = cfg.clone();
+        let cfg_c = cfg.clone();
 
         tokio::spawn(async move {
             if let Err(e) = batch::process(pool_c, settler_c, cfg_c, job_inputs).await {

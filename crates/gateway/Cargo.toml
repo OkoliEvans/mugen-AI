@@ -23,6 +23,7 @@ uuid               = { version = "1", features = ["v4", "serde"] }
 chrono             = { version = "0.4", features = ["serde"] }
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+rkyv = { version = "0.7", default-features = false, features = ["alloc", "size_64"] }
 thiserror          = "1"
 anyhow             = "1"
 dotenvy            = "0.15"

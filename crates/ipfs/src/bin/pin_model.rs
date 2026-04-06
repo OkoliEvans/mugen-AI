@@ -14,29 +14,29 @@ use std::path::PathBuf;
 
 #[derive(Debug)]
 struct Args {
-    file:    PathBuf,
-    name:    String,
+    file: PathBuf,
+    name: String,
     version: String,
 }
 
 fn parse_args() -> Args {
     let mut args = std::env::args().skip(1);
-    let mut file    = None;
-    let mut name    = None;
+    let mut file = None;
+    let mut name = None;
     let mut version = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--file"    => file    = args.next().map(PathBuf::from),
-            "--name"    => name    = args.next(),
+            "--file" => file = args.next().map(PathBuf::from),
+            "--name" => name = args.next(),
             "--version" => version = args.next(),
-            other       => eprintln!("unknown arg: {other}"),
+            other => eprintln!("unknown arg: {other}"),
         }
     }
 
     Args {
-        file:    file.expect("--file <path> is required"),
-        name:    name.expect("--name <name> is required"),
+        file: file.expect("--file <path> is required"),
+        name: name.expect("--name <name> is required"),
         version: version.expect("--version <semver> is required"),
     }
 }
@@ -77,7 +77,10 @@ async fn main() {
         })),
     };
 
-    match client.pin_bytes(Bytes::from(bytes), filename, Some(meta)).await {
+    match client
+        .pin_bytes(Bytes::from(bytes), filename, Some(meta))
+        .await
+    {
         Ok(cid) => {
             let url = client.gateway_url(&cid);
             // Print CID to stdout so it can be captured by shell scripts
@@ -86,9 +89,14 @@ async fn main() {
             eprintln!("");
             eprintln!("Next steps:");
             eprintln!("  export MODEL_IPFS_CID={cid}");
-            eprintln!("  export MODEL_NAME={}", args.name.replace(' ', "_").to_lowercase());  
+            eprintln!(
+                "  export MODEL_NAME={}",
+                args.name.replace(' ', "_").to_lowercase()
+            );
             eprintln!("  export MODEL_VERSION={}", "0.1.0");
-            eprintln!("  export MODEL_INPUT_SHAPE=$(cast abi-encode 'f(uint256[])' '[1,4]' | cut -c3-)");
+            eprintln!(
+                "  export MODEL_INPUT_SHAPE=$(cast abi-encode 'f(uint256[])' '[1,4]' | cut -c3-)"
+            );
             eprintln!("  forge script script/Deploy.s.sol:Deploy --sig 'deployInference()' ...");
         }
         Err(e) => {

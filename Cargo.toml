@@ -3,9 +3,22 @@ members = [
     "crates/aggregator",
     "crates/common",
     "crates/gateway",
+    "crates/guest",
     "crates/ipfs",
+    "crates/models/tiny_mlp",
+    "crates/prover",
     "crates/prover-manager",
     "crates/settler",
-
+    "sdk/Rust",
 ]
 resolver = "2"
+
+[patch.crates-io]
+sha2 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", package = "sha2", tag = "patch-sha2-0.10.9-sp1-6.0.0" }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1

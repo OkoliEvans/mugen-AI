@@ -28,6 +28,8 @@ diesel::table! {
         settled_at -> Nullable<Timestamptz>,
         tx_hash -> Nullable<Text>,
         batch_id -> Nullable<Uuid>,
+        attestation_hash -> Nullable<Text>,
+        proof_bytes -> Nullable<Bytea>,
     }
 }
 

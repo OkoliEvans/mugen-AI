@@ -37,8 +37,5 @@ pub enum SettlerError {
 
     /// StarkNet L1→L2 settlement did not confirm within the polling window.
     #[error("starknet settlement not confirmed after {attempts} attempts ({interval_secs}s each)")]
-    StarknetTimeout {
-        attempts:      u32,
-        interval_secs: u64,
-    },
+    StarknetTimeout { attempts: u32, interval_secs: u64 },
 }

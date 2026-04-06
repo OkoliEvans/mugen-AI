@@ -1,0 +1,19 @@
+# crates/guest/Cargo.toml
+
+[package]
+name    = "inference-guest"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "inference-guest"
+path = "src/main.rs"
+
+[dependencies]
+sp1-zkvm   = "6.0.0"
+sp1-derive = "6.0.0"
+tiny-mlp   = { path = "../models/tiny_mlp" }
+rkyv = { version = "0.7", default-features = false, features = ["alloc", "size_64"] }
+sha2       = { version = "0.10.9", default-features = false, features = ["compress"] }
+hex = "0.4.3"
+

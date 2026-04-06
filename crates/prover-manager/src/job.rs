@@ -1,53 +1,60 @@
+// crates/prover_manager/src/job.rs
+
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
 
-/// Sent to the Python worker via stdin
-#[derive(Debug, Clone, Serialize)]
-pub struct ProveJob {
-    pub job_id: String,
-    pub input_data: Vec<Vec<f64>>,
-    pub artifacts_dir: String,
-}
-
-/// Received from the Python worker via stdout
-#[derive(Debug, Clone, Deserialize)]
-pub struct WorkerResult {
-    pub job_id: String,
-    pub status: WorkerStatus,
-    pub proof_path: Option<String>,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum WorkerStatus {
-    Ok,
-    Error,
-}
-
-/// Internal job state tracked by the manager
-#[derive(Debug, Clone, PartialEq)]
-pub enum JobState {
-    Queued,
-    Running,
-    Done { proof_path: String },
-    Failed { reason: String },
-}
-
-/// Full job record stored in the manager
+/// Job lifecycle states.
+///
+/// Gateway's spawn_settler loop depends on these variants — the variants
+/// Queued, Running, Done, and Failed must remain stable. Compressed is new
+/// and is inserted between Running and Done for the two-phase proving path.
+///
+/// State machine:
+///   Queued → Running → Compressed → Done
+///                    ↘ Failed (at any transition)
 #[derive(Debug, Clone)]
-pub struct JobRecord {
-    pub job_id: String,
-    pub state: JobState,
-    pub created_at: Instant,
+pub enum JobState {
+    /// Job is queued, not yet picked up by a worker.
+    Queued,
+    /// Worker acquired the semaphore slot and is actively proving.
+    Running,
+    /// Phase 1 complete: compressed STARK proof ready.
+    /// attestation_hash is available. Groth16 wrapping is in progress.
+    Compressed {
+        attestation_hash: [u8; 32],
+    },
+    /// Phase 2 complete: Groth16 proof written to disk.
+    /// Proof is now submittable on-chain via submitProof().
+    Done {
+        proof_path: String,
+    },
+    /// Terminal failure. reason contains the human-readable error.
+    Failed {
+        reason: String,
+    },
 }
 
-impl JobRecord {
-    pub fn new(job_id: String) -> Self {
-        Self {
-            job_id,
-            state: JobState::Queued,
-            created_at: Instant::now(),
-        }
+impl JobState {
+    /// Returns true for terminal states — no further transitions possible.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, JobState::Done { .. } | JobState::Failed { .. })
     }
+}
+
+/// Internal proof result stored in memory after successful Groth16 proving.
+/// Written to the ProofMap in ProverManager and persisted to Postgres
+/// by the gateway's spawn_settler.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProofData {
+    /// Raw Groth16 proof bytes — passed to InferenceVerifier.submitProof()
+    pub proof_bytes:      Vec<u8>,
+    /// sha256(model_id || input_hash || output_hash)
+    /// Committed on-chain as the attestation key.
+    /// NOTE: switch to keccak256 before mainnet for EVM alignment.
+    pub attestation_hash: [u8; 32],
+    /// sha256(weights_bytes) — the committed model identity
+    pub model_id:         [u8; 32],
+    /// sha256(input_le_bytes) — committed by the guest program
+    pub input_hash:       [u8; 32],
+    /// sha256(output_le_bytes) — committed by the guest program
+    pub output_hash:      [u8; 32],
 }
