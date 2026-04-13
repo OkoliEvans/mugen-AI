@@ -3,7 +3,7 @@
 use crate::error::SettlerError;
 
 /// Configuration for the Settler.
-/// StarkNet fields removed — settlement is now direct to HashKey testnet.
+/// settlement is now direct to HashKey testnet.
 #[derive(Debug, Clone)]
 pub struct SettlerConfig {
     /// RPC endpoint — HashKey testnet (https://testnet.hsk.xyz)
@@ -19,11 +19,11 @@ pub struct SettlerConfig {
 
     // ── Kept for gateway AppState compatibility — unused in HashKey path ──────
     pub eth_sepolia_inference_bridge: String,
-    pub starknet_rpc: String,
-    pub starknet_inference_verifier: String,
-    pub starknet_poll_interval_secs: u64,
-    pub starknet_max_poll_attempts: u32,
-    pub starknet_bridge_fee_wei: u64,
+    pub rpc: String,
+    pub inference_verifier: String,
+    pub poll_interval_secs: u64,
+    pub max_poll_attempts: u32,
+    pub bridge_fee_wei: u64,
 }
 
 impl SettlerConfig {
@@ -38,12 +38,12 @@ impl SettlerConfig {
             // Kept for struct compat — not used in HashKey settlement path
             eth_sepolia_inference_bridge: std::env::var("ETH_SEPOLIA_INFERENCE_BRIDGE")
                 .unwrap_or_default(),
-            starknet_rpc: std::env::var("STARKNET_RPC").unwrap_or_default(),
-            starknet_inference_verifier: std::env::var("STARKNET_INFERENCE_VERIFIER")
+            rpc: std::env::var("RPC").unwrap_or_default(),
+            inference_verifier: std::env::var("INFERENCE_VERIFIER")
                 .unwrap_or_default(),
-            starknet_poll_interval_secs: optional_env_u64("STARKNET_POLL_INTERVAL_SECS", 15),
-            starknet_max_poll_attempts:  optional_env_u64("STARKNET_MAX_POLL_ATTEMPTS", 24) as u32,
-            starknet_bridge_fee_wei:     optional_env_u64("SETTLER_STARKNET_BRIDGE_FEE_WEI", 0),
+            poll_interval_secs: optional_env_u64("POLL_INTERVAL_SECS", 15),
+            max_poll_attempts:  optional_env_u64("MAX_POLL_ATTEMPTS", 24) as u32,
+            bridge_fee_wei:     optional_env_u64("SETTLER_BRIDGE_FEE_WEI", 0),
         })
     }
 }

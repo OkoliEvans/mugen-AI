@@ -5,15 +5,17 @@
 
 > Prove any ML inference. On-chain.
 
-Mugen generates ZK proofs of model inference using EZKL, verifies them on-chain via Halo2 KZG, and settles the attestation on StarkNet — all from a single SDK call.
+Mugen generates ZK proofs of ML model inference using SP1 (Succinct's zkVM), verifies them on-chain via Groth16, and settles attestations on HashKey Chain — all from a single SDK call.
 
 ---
 
 ## Table of Contents
 
+- [Why Verifiable Inference](#why-verifiable-inference)
 - [How It Works](#how-it-works)
 - [Architecture](#architecture)
 - [Model Registry & IPFS](#model-registry--ipfs)
+- [Proof Aggregation](#proof-aggregation)
 - [Deployed Contracts](#deployed-contracts)
 - [Quick Start](#quick-start)
 - [API Reference](#api-reference)
@@ -21,20 +23,36 @@ Mugen generates ZK proofs of model inference using EZKL, verifies them on-chain 
 
 ---
 
+## Why Verifiable Inference
+
+AI is making consequential decisions at scale — in trading, lending, hiring, medical diagnosis, and content moderation. But the institutions built around accountability were designed for human decision-making. When an algorithm denies a loan, recommends a trade, or flags a medical image, there is currently no cryptographic way to prove after the fact that a specific model produced a specific output from a specific input. Logs can be altered. Models can be silently updated. Audit trails are mutable.
+
+Mugen closes this gap. By executing ML inference inside a ZK virtual machine, every decision becomes a proof: unforgeable, permanent, and verifiable by anyone without access to the original data.
+
+**Prediction markets and finance.** Algorithmic trading funds are black boxes. A fund that claims 70% win rate has no way to prove the strategy wasn't back-adjusted or run on a different model than disclosed. With verifiable inference, every trade carries a proof tying it to a specific model version and specific inputs — a permanent, tamper-proof audit trail. This directly addresses MiFID II requirements for algorithmic trading accountability and enables genuinely trustless performance reporting.
+
+**Credit scoring and lending.** When a bank denies a loan based on an AI model, regulators and courts currently have no way to confirm the disclosed model was actually used. A ZK proof of inference creates a legally defensible record: this exact model, this exact input, this exact decision, at this exact time. GDPR's right to explanation and the EU AI Act's transparency requirements for high-stakes AI decisions point directly at this problem. Mugen provides the cryptographic primitive that makes compliance possible by construction rather than by policy.
+
+**Healthcare and diagnostics.** AI diagnostic tools that recommend treatments or flag abnormalities create liability questions that are currently resolved by mutable audit logs. When a patient outcome is disputed, the question is whether the AI actually recommended what the doctor claims, and whether it was the approved version of the model. With verifiable inference, every diagnostic output is a proof: model version, patient feature vector, recommendation, and timestamp — immutable on-chain. Post-market surveillance for FDA-regulated AI medical devices could shift from self-reporting to a complete verifiable record of every inference the device made.
+
+**The key insight.** Verifiable inference does not require making the model public, exposing patient data, or revealing proprietary inputs. The ZK proof attests to the relationship between inputs and outputs without revealing either. You get accountability without sacrificing privacy or competitive advantage. That is the gap Mugen fills.
+
+---
+
 ## How It Works
 
-Standard ML inference produces no cryptographic guarantees — there is no way to verify on-chain that a given output was produced by a specific model from a specific input. Mugen solves this using ZK proofs.
+Standard ML inference produces no cryptographic guarantees — there is no way to verify on-chain that a given output was produced by a specific model from a specific input. Mugen solves this using ZK proofs of program execution via SP1.
 
 **The pipeline:**
 
 1. A client submits an inference request to the Mugen gateway with a model ID and input data.
-2. The gateway runs the model via EZKL, which executes the inference inside a ZK circuit and produces a Halo2 KZG proof alongside the output.
-3. The proof is submitted to `InferenceBridge.sol` on Ethereum Sepolia. The contract runs the KZG pairing check on-chain, confirming the output was produced honestly by the committed model.
-4. Upon successful verification, `InferenceBridge.sol` calls `IStarknetMessaging.sendMessageToL2()` — forwarding the attestation to StarkNet via the canonical L1→L2 messaging contract.
-5. `InferenceVerifier.cairo` on StarkNet Sepolia consumes the message and permanently records the attestation: inference ID, model hash, submitter, and timestamp.
-6. The SDK resolves with the EVM transaction hash and a proof-derived attestation hash. The settlement is now queryable on StarkNet.
+2. The gateway sends the job to the SP1 prover network (Succinct). The inference is executed inside the SP1 zkVM, producing a compressed STARK proof alongside the output. The attestation hash is available after this phase (~60s).
+3. A Groth16 SNARK wraps the STARK proof, producing a compact proof suitable for EVM verification (~120s additional).
+4. Completed proofs are batched by the gateway's aggregator. When a batch threshold is reached (or a flush timer fires), all N compressed proofs are recursively verified inside a second SP1 program, producing one Groth16 proof that covers the entire batch.
+5. The aggregated Groth16 proof is submitted to `InferenceVerifier.sol` on HashKey testnet via `submitAggregatedProof()`. The contract verifies the proof and emits `InferenceVerified` for each output hash in the batch.
+6. The SDK resolves with the settlement tx hash and attestation hash.
 
-**What gets proven:** That a specific model (identified by `keccak256(name, version)`) produced a specific output from a specific input. The proof is binding — the same public inputs always produce the same valid proof for a committed model.
+**What gets proven:** That a specific model (identified by `sha256(weights_bytes)`) produced a specific output from a specific input. The proof is binding — the SP1 guest program commits `model_id`, `input_hash`, and `output_hash` as public values, and the on-chain verifier checks them against the registered model.
 
 ---
 
@@ -44,31 +62,38 @@ Standard ML inference produces no cryptographic guarantees — there is no way t
 Model Registration (once per model)
     │
     ├── POST /v1/models → Pinata IPFS → CID
-    └── InferenceVerifier.sol.registerModel(modelId, ipfsCid, inputShapeHash)
+    └── InferenceVerifier.sol.registerModel(sha256(weights), ipfsCid, inputShapeHash)
 
-Client (@mugen/sdk)
+Client (@mugen-ai/sdk or mugen-sdk Rust crate)
     │
     ▼
 Mugen Gateway  (Rust / Actix-web)
     │  POST /v1/jobs
     │  Queues job, persists to Postgres
-    │  Runs EZKL proof generation (Python subprocess)
-    │  Proof committed to registered modelId
     │
     ▼
-InferenceBridge.sol  (Ethereum Sepolia)
-    │  Verifies Halo2 KZG proof on-chain
-    │  Emits InferenceVerified event
-    │  Calls IStarknetMessaging.sendMessageToL2()
+Prover Manager  (crates/prover-manager)
+    │  Phase 1 — compressed STARK via SP1 Succinct Network (~60s)
+    │    → attestation_hash available
+    │    → CompressedData stored in memory
+    │  Phase 2 — optional per-job Groth16 (currently bypassed by aggregation)
     │
-    ▼  L1→L2 message (~1–3 min relay)
+    ▼
+Batch Collector  (gateway/src/main.rs)
+    │  Accumulates compressed proofs
+    │  Flushes on BATCH_SIZE threshold OR BATCH_FLUSH_SECS timer
     │
-InferenceVerifier.cairo  (StarkNet Sepolia)
-    │  #[l1_handler] consume_inference_result()
-    │  Validates L1 sender against whitelist
-    │  Replay protection via inference_id
-    │  Writes InferenceRecord to storage
-    │  Emits InferenceVerified event
+    ▼
+Aggregator  (crates/aggregator + crates/aggregator-guest)
+    │  Recursively verifies N compressed proofs inside SP1 zkVM
+    │  Commits merkle_root(output_hashes) + batch_size as public values
+    │  Produces one Groth16 proof covering the entire batch
+    │
+    ▼
+Settler  (crates/settler)
+    │  submitAggregatedProof(proofBytes, publicValues, outputHashes[])
+    │  InferenceVerifier.sol on HashKey testnet
+    │  Marks each job "settled" in Postgres with tx_hash
     │
     ▼
 Settlement confirmed — SDK resolves
@@ -78,51 +103,46 @@ Settlement confirmed — SDK resolves
 
 ```
 crates/
-├── gateway/        — Actix-web HTTP API, job lifecycle, DB persistence
-├── settler/        — Alloy EVM submitter + StarkNet poller
-├── prover_manager/ — EZKL subprocess orchestration
-├── common/         — Diesel models, repo layer, migrations
-└── ipfs/           — Pinata client for model artifact pinning
+├── gateway/           — Actix-web HTTP API, job lifecycle, batch collector, DB persistence
+├── settler/           — Alloy EVM submitter (individual + aggregated proofs)
+├── prover-manager/    — SP1 two-phase proving orchestration (compressed → Groth16)
+├── aggregator/        — Batch aggregation logic: builds stdin for aggregator-guest
+├── aggregator-guest/  — SP1 zkVM program: recursively verifies N proofs, commits merkle root
+├── guest/             — SP1 zkVM inference program: runs MLP, commits model_id/input_hash/output_hash
+├── models/tiny_mlp/   — 4→8→2 MLP forward pass (Rust, no_std compatible)
+├── common/            — Diesel models, repo layer, migrations
+└── ipfs/              — Pinata client for model artifact pinning
 
-contracts/
-├── evm/
-│   ├── src/InferenceVerifier.sol   — on-chain proof registry + model registry
-│   ├── src/InferenceBridge.sol     — KZG verifier + L1→L2 relay
-│   └── script/Deploy.s.sol         — Foundry deployment script
-└── starknet_l2/
-    └── src/inference_verifier.cairo — settlement consumer
+contracts/evm/
+├── src/InferenceVerifier.sol   — model registry + proof verifier + batch settlement
+└── lib/sp1-contracts/          — SP1VerifierGateway + SP1VerifierGroth16 (v6.0.0)
 
 sdk/
-└── src/
-    ├── client.ts   — ElenxisClient
-    ├── types.ts    — shared types
-    ├── poller.ts   — job polling loop
-    └── http.ts     — Axios wrapper with retry
+├── Rust/       — mugen-sdk Rust crate (VeilClient, verify_inference)
+└── Typescript/ — @mugen-ai/sdk npm package (VeilClient)
 ```
 
 ---
 
 ## Model Registry & IPFS
 
-Before a model can be used for inference, it must be registered. Registration does two things: pins the model artifact to IPFS via Pinata, and records the model identity on-chain so the proof circuit can commit to it.
+Before a model can be used for inference, it must be registered. Registration pins the model weights to IPFS and records the model identity on-chain.
 
 **What gets stored on IPFS:**
 
 | Artifact | Format | Description |
 |---|---|---|
-| Model artifact | `.onnx` | The ONNX model file, base64-decoded from the registration request |
-
-The file is pinned via the Pinata v2 API and returns a content-addressed CID (e.g. `QmXyz...`). The same bytes always produce the same CID regardless of where they are pinned.
+| Model weights | raw binary | Flat f32 little-endian weight file |
 
 **What gets stored on-chain (`InferenceVerifier.sol`):**
 
 | Field | Value |
 |---|---|
-| `modelId` | `keccak256(abi.encodePacked(name, version))` |
+| `modelId` | `sha256(weights_bytes)` — must match what the SP1 guest commits |
 | `ipfsCidHash` | `keccak256(ipfsCid)` |
 | `inputShapeHash` | `keccak256(abi_encode(uint256[]))` of the input dimensions |
 
-The `modelId` is the binding key between the IPFS artifact and the ZK circuit. When EZKL generates a proof, it commits to this same `modelId` as a public input — so the on-chain verifier can confirm not just that _a_ valid inference was run, but that it was run on the _specific registered model_ at the _specific IPFS CID_.
+**Critical:** The `modelId` is `sha256(weights_bytes)`, not `keccak256(name + version)`. The SP1 guest computes `sha256(weights)` at proving time and commits it as a public value. The on-chain registry must use the same derivation or `submitProof` will revert with `ModelNotRegistered`.
 
 **Registration flow:**
 
@@ -131,13 +151,9 @@ POST /v1/models  { name, version, artifact_b64, input_shape }
        │
        ├── 1. Decode base64 artifact bytes
        ├── 2. Pin to IPFS via Pinata → CID
-       ├── 3. Call InferenceVerifier.registerModel(modelId, ipfsCid, inputShapeHash)
-       └── 4. Persist to Postgres (model_id, ipfs_cid, on_chain_hash)
-```
-
-**IPFS gateway URL** — after registration the artifact is publicly accessible at:
-```
-https://<PINATA_GATEWAY_URL>/ipfs/<CID>
+       ├── 3. Compute modelId = sha256(artifact_bytes)
+       ├── 4. Call InferenceVerifier.registerModel(modelId, ipfsCid, inputShapeHash)
+       └── 5. Persist to Postgres (model_id, ipfs_cid, on_chain_hash)
 ```
 
 **Required env vars for IPFS:**
@@ -146,83 +162,105 @@ PINATA_JWT=eyJ...
 PINATA_GATEWAY_URL=<your-gateway>.mypinata.cloud
 ```
 
-If `PINATA_JWT` is not set, `POST /v1/models` returns `503`. Inference jobs can still run against previously registered models.
+---
+
+## Proof Aggregation
+
+Mugen batches N inference proofs into a single on-chain transaction, making verifiable inference economically viable at scale.
+
+**How it works:**
+
+Each inference job produces a compressed SP1 proof (phase 1). Instead of submitting one Groth16 proof per job, the gateway accumulates compressed proofs in a batch collector. When the batch is full (or a flush timer fires), the aggregator-guest program verifies all N proofs recursively inside the SP1 zkVM and commits `merkle_root(output_hashes)` as its public output. One Groth16 proof covers the entire batch.
+
+**On-chain:** `submitAggregatedProof(proofBytes, publicValues, outputHashes[])` on `InferenceVerifier.sol` verifies the batch proof and marks all N output hashes as settled in a single transaction.
+
+**Batch configuration:**
+
+```dotenv
+BATCH_SIZE=10           # flush when N proofs are pending
+BATCH_FLUSH_SECS=60     # flush timer interval
+AGG_ELF_PATH=crates/aggregator-guest/elf/aggregator-guest
+```
+
+**Economic impact:** N inferences → 1 on-chain verification. At BATCH_SIZE=10, gas cost per inference drops by ~10x compared to individual settlement.
 
 ---
 
 ## Deployed Contracts
 
-### Ethereum Sepolia
+### HashKey Testnet
 
 | Contract | Address |
 |---|---|
-| Halo2Verifier | `0x7bcf4980868bA06A38AC561904aE6BDEd9Ee46D2` |
-| InferenceVerifier | `0x37c5c1E314d2d895Dce71d2fbDBB49DDA74c8699` |
-| InferenceBridge | `0x820fa9edB1DD0f248A4a8FB44693505417656480` |
-| StarkNet Core (L1 messaging) | `0xE2Bb56ee936fd6433DC0F6e7e3b8365C906AA057` |
+| InferenceVerifier | `0x69f77055e9A6e6B34539Db2BD733f9eB07F9f11f` |
+| SP1VerifierGateway | `0x0Be1C31a27F6477dd5DeB4eC4302B4cF199362CF` |
+| SP1VerifierGroth16 (v6.0.0) | `0x75e3a5461eAa204a1fce8b54De3cf572aEEA9504` |
 
-### StarkNet Sepolia
+### Registered Models
 
-| Contract | Address |
-|---|---|
-| InferenceVerifier.cairo | `0x048e54ece6691ca3f76246895cc1ac7c073a9377e02518aeed908618eb5ec7ca` |
+| Model | Version | modelId (sha256 of weights) | IPFS CID |
+|---|---|---|---|
+| tiny_mlp_v1 | 0.1.0 | `0x91db243a5b7956c0818e930c6abde3a47b14dd47a71928367409535f04aa32ed` | `QmYesbfR1uEzXyVVUwaiKvjJD3642f1w6WSsbNn4vpo47A` |
+| polymarket_mlp_v1 | 0.1.0 | `0xac83407e4cd7e6336efa508e74680a6c667546f61cd54c3622b3027d8ea1a8e6` | `QmVGTbbYRRHwvKh2Lq84fhvYSZktKCQHG6jnu6sd55VNvf` |
 
 ---
 
 ## Quick Start
 
-### Prerequisites
-
-- Node.js 18+
-- A running Mugen gateway (see [Deployment Guide](#deployment-guide))
-
-### Install the SDK
+### TypeScript SDK
 
 ```bash
-npm install @mugen/sdk
+npm install @mugen-ai/sdk
 ```
 
-### Verify an inference
-
 ```typescript
-import { ElenxisClient } from '@mugen/sdk';
+import { VeilClient } from '@mugen-ai/sdk'
 
-const client = new ElenxisClient({
-  gatewayUrl: 'http://localhost:8080',
-  timeoutMs:  300_000,   // 5 min — accounts for L1→L2 relay time
-});
+const client = new VeilClient({
+  gatewayUrl: 'https://your-gateway.xyz',
+  timeoutMs:  600_000,
+})
 
-const result = await client.verifyInference({
-  modelId:   'tiny_mlp_v1',
-  inputData: [[0.1, 0.2, 0.3, 0.4]],
-});
+const job = await client.verifyInference({
+  modelId:   'polymarket_mlp_v1',
+  inputData: [[0.6, 0.4, 12000, 0.2]],
+})
 
-console.log(result.txHash);           // Eth Sepolia tx hash
-console.log(result.attestationHash);  // proof-derived fingerprint
-console.log(result.elapsedMs);        // total wall time including StarkNet relay
+console.log(job.attestationHash) // keccak256(model_id||input_hash||output_hash)
+console.log(job.txHash)          // HashKey testnet settlement tx
+console.log(job.elapsedMs)       // total wall time
+```
+
+### Rust SDK
+
+```toml
+[dependencies]
+mugen-sdk = { path = "sdk/Rust" }
+```
+
+```rust
+use mugen_sdk::VeilClient;
+
+let client = VeilClient::new("https://your-gateway.xyz");
+
+let job = client
+    .verify_inference("polymarket_mlp_v1", vec![vec![0.6, 0.4, 12000.0, 0.2]])
+    .await?;
+
+println!("attestation_hash: {}", job.attestation_hash);
+println!("tx_hash:          {}", job.tx_hash);
 ```
 
 ### Run the e2e test
 
 ```bash
-cd sdk
-GATEWAY_URL=http://localhost:8080 TIMEOUT_MS=300000 npm run e2e
-```
+# TypeScript
+cd sdk/Typescript
+GATEWAY_URL=http://localhost:8080 npm run e2e
 
-Expected output:
-
-```
-  ✅ PASS — Gateway is healthy
-  ✅ PASS — result.jobId is a non-empty string
-  ✅ PASS — result.txHash starts with 0x
-  ✅ PASS — result.attestationHash starts with 0x and is 66 chars
-  ✅ PASS — result.elapsedMs is a positive number
-  ✅ PASS — job.status === "settled"
-  ✅ PASS — job.txHash matches verifyInference result
-  ✅ PASS — proof.proofHex is a non-empty hex string
-  ✅ PASS — proof.sizeBytes > 0
-
-  🎉 All assertions passed
+# Rust
+cd sdk/Rust
+GATEWAY_URL=http://localhost:8080 cargo test --test e2e -- --ignored
 ```
 
 ---
@@ -256,24 +294,35 @@ Poll job status.
 **Response (settled):**
 ```json
 {
-  "job_id":  "550e8400-e29b-41d4-a716-446655440000",
-  "status":  "settled",
-  "tx_hash": "0x9a6c10bed212d03dac524252aeaf7605cb960721b6a7a3afab462cad330ca81d"
+  "job_id":           "550e8400-e29b-41d4-a716-446655440000",
+  "status":           "settled",
+  "attestation_hash": "0xfac658be...",
+  "tx_hash":          "0x11f18c8e..."
 }
 ```
 
-Status values: `queued` → `running` → `done` → `settled` | `failed`
+Status values: `queued` → `running` → `proving` → `done` → `settled` | `failed`
+
+| Status | Meaning |
+|---|---|
+| `queued` | Job accepted, waiting for prover slot |
+| `running` | SP1 prover is executing the inference |
+| `proving` | Phase 1 complete — compressed proof ready, attestation_hash available |
+| `done` | Proof queued in batch collector awaiting aggregation |
+| `settled` | Aggregated proof verified on HashKey testnet, tx_hash available |
+| `failed` | Proving or settlement failed |
 
 ### `GET /v1/jobs/:id/proof`
 
-Fetch raw proof bytes for a completed job.
+Returns attestation info for a completed job. Individual Groth16 proofs are batched — use the batch tx_hash for on-chain lookup.
 
 **Response:**
 ```json
 {
-  "job_id":     "550e8400-e29b-41d4-a716-446655440000",
-  "proof_hex":  "29acaa...",
-  "size_bytes": 14203
+  "job_id":           "550e8400-e29b-41d4-a716-446655440000",
+  "status":           "compressed",
+  "attestation_hash": "0xfac658be...",
+  "note": "compressed proof is queued in the aggregator batch"
 }
 ```
 
@@ -286,7 +335,7 @@ Register a model with IPFS pinning and on-chain registration.
 {
   "name":         "tiny_mlp_v1",
   "version":      "0.1.0",
-  "artifact_b64": "<base64-encoded ONNX>",
+  "artifact_b64": "<base64-encoded weights binary>",
   "input_shape":  [1, 4]
 }
 ```
@@ -295,8 +344,8 @@ Register a model with IPFS pinning and on-chain registration.
 ```json
 {
   "model_id":          "uuid",
-  "on_chain_model_id": "0xkeccak256...",
-  "ipfs_cid":          "QmXyz...",
+  "on_chain_model_id": "0x91db243a...",
+  "ipfs_cid":          "QmYesbfR...",
   "gateway_url":       "https://...",
   "on_chain_hash":     "0xtxhash..."
 }
@@ -305,24 +354,13 @@ Register a model with IPFS pinning and on-chain registration.
 ### `GET /healthz`
 
 ```json
-{ "status": "ok", "version": "0.1.0", "settle_enabled": true, "db": "connected" }
+{
+  "status": "ok",
+  "version": "0.1.0",
+  "settle_enabled": true,
+  "db": "connected"
+}
 ```
-
----
-
-## Production Notes
-
-### Live Inference on the Hosted Demo
-
-The hosted gateway at the demo UI may not successfully complete proof generation due to resource constraints on the current deployment tier. Generating a Halo2 KZG proof is computationally intensive — even for small models, the prover requires significant RAM and CPU time.
-
-If inference fails on the live demo, clone the repo and run the gateway locally following the [Deployment Guide](#deployment-guide) below.
-
-### Model Scale
-
-`tiny_mlp_v1` is a minimal 4-input MLP used for MVP demonstration only. It exists to validate the full pipeline end-to-end: inference → ZK proof → on-chain verification → StarkNet attestation.
-
-In production, Mugen is designed to run industry-scale models — ResNet-18, MobileNet, and equivalent architectures. These models have significantly larger circuit parameters (`k ≥ 21`), proof generation times measured in minutes, and proving keys in the gigabyte range. The architecture scales to accommodate them: the prover runs as a dedicated service, artifacts are stored in object storage, and the gateway remains a lightweight orchestration layer.
 
 ---
 
@@ -330,106 +368,148 @@ In production, Mugen is designed to run industry-scale models — ResNet-18, Mob
 
 ### Prerequisites
 
-- Rust 1.75+
-- Python 3.9+ with EZKL installed
+- Rust 1.75+ with SP1 toolchain (`cargo prove`)
 - PostgreSQL
 - Foundry (`forge`, `cast`)
-- Starknet Foundry (`sncast`)
+- Succinct Network API key (`SP1_PRIVATE_KEY`)
 
-### 1. Environment
+### 1. Install SP1 toolchain
+
+```bash
+curl -L https://sp1up.dev | bash
+sp1up --version 6.0.0
+```
+
+### 2. Build the guest ELFs
+
+```bash
+# Inference guest
+cd crates/guest && cargo prove build --output-directory elf --elf-name inference-guest
+
+# Aggregator guest
+cd crates/aggregator-guest && cargo prove build --output-directory elf --elf-name aggregator-guest
+```
+
+### 3. Environment
 
 ```dotenv
 # Gateway
 HOST=0.0.0.0
 PORT=8080
+CLIENT_URL=http://localhost:3000
 DATABASE_URL=postgresql://user:pass@localhost:5432/mugen
 
 # Prover
-PYTHON_BIN=/path/to/.venv/bin/python3
-WORKER_SCRIPT=prover/worker.py
-ARTIFACTS_DIR=prover/artifacts
-MAX_CONCURRENT=2
-TIMEOUT_SECS=120
+SP1_PROVER=network
+NETWORK_PRIVATE_KEY=0x...          # Succinct Network key
+GUEST_ELF_PATH=crates/guest/elf/inference-guest
+MODEL_WEIGHTS_PATH=weights/tiny_mlp.bin
+PROOFS_DIR=/tmp/mugen-proofs
+MAX_CONCURRENT=1
+TIMEOUT_SECS=300
 
-# Settler
-SETTLER_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+# Aggregator
+AGG_ELF_PATH=crates/aggregator-guest/elf/aggregator-guest
+BATCH_SIZE=10
+BATCH_FLUSH_SECS=60
+
+# Settler — HashKey testnet
+SETTLER_RPC_URL=https://testnet.hsk.xyz
 SETTLER_PRIVATE_KEY=0x...
-INFERENCE_VERIFIER_ADDRESS=0x37c5c1E314d2d895Dce71d2fbDBB49DDA74c8699
-
-# StarkNet settlement
-ETH_SEPOLIA_INFERENCE_BRIDGE=0x820fa9edB1DD0f248A4a8FB44693505417656480
-STARKNET_RPC=https://starknet-sepolia.public.blastapi.io/rpc/v0_7
-STARKNET_INFERENCE_VERIFIER=0x048e54ece6691ca3f76246895cc1ac7c073a9377e02518aeed908618eb5ec7ca
-STARKNET_POLL_INTERVAL_SECS=15
-STARKNET_MAX_POLL_ATTEMPTS=24
-SETTLER_STARKNET_BRIDGE_FEE_WEI=30000000000000000
+INFERENCE_VERIFIER_ADDRESS=0x47A7EA849d500625aa424bF90a5DF4814895C279
 
 # IPFS
 PINATA_JWT=eyJ...
 PINATA_GATEWAY_URL=<your-gateway>.mypinata.cloud
 ```
 
-### 2. Database
+### 4. Database
 
 ```bash
 createdb mugen
 cargo run -p gateway   # migrations run automatically on startup
 ```
 
-### 3. Gateway
+### 5. Register a model
 
 ```bash
-cargo build --release
+curl -X POST http://localhost:8080/v1/models \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"name\": \"tiny_mlp_v1\",
+    \"version\": \"0.1.0\",
+    \"artifact_b64\": \"$(base64 -i weights/tiny_mlp.bin)\",
+    \"input_shape\": [1, 4]
+  }"
+```
+
+### 6. Run the gateway
+
+```bash
+cargo build --release -p gateway
 ./target/release/gateway
 ```
 
-### 4. Deploy contracts (fresh deployment)
-
-**StarkNet — declare and deploy `InferenceVerifier.cairo`:**
-
-```bash
-cd contracts/starknet_l2
-scarb build
-
-sncast --account <account> declare \
-  --url $STARKNET_RPC \
-  --contract-name InferenceVerifier
-
-# Deploy with owner address and placeholder L1 bridge (whitelist after EVM deploy)
-sncast --account <account> deploy \
-  --url $STARKNET_RPC \
-  --class-hash <CLASS_HASH> \
-  --constructor-calldata <OWNER_ADDRESS> 0x0
-```
-
-**EVM — deploy `InferenceBridge.sol`:**
+### 7. Deploy contracts (fresh deployment)
 
 ```bash
 cd contracts/evm
 
-export HALO2_VERIFIER_ADDRESS=0x7bcf4980868bA06A38AC561904aE6BDEd9Ee46D2
-export STARKNET_CORE_ADDRESS=0xE2Bb56ee936fd6433DC0F6e7e3b8365C906AA057
-export CAIRO_DEST=$(python3 -c "print(int('<CAIRO_ADDR_WITHOUT_0x>', 16))")
-export CAIRO_SELECTOR=$(python3 -c "from starknet_py.hash.selector import get_selector_from_name; print(get_selector_from_name('consume_inference_result'))")
-
-forge script script/Deploy.s.sol:Deploy \
-  --sig "deployBridge()" \
-  --rpc-url $RPC_URL \
+# Deploy SP1VerifierGroth16 and register route with gateway
+forge script script/AddGroth16Route.s.sol:AddGroth16Route \
+  --rpc-url https://testnet.hsk.xyz \
   --private-key $PRIVATE_KEY \
-  --broadcast \
-  --verify \
-  --etherscan-api-key $ETHERSCAN_API_KEY
+  --broadcast
+
+# Deploy InferenceVerifier
+forge script script/Deploy.s.sol:Deploy \
+  --rpc-url https://testnet.hsk.xyz \
+  --private-key $PRIVATE_KEY \
+  --broadcast
 ```
 
-**Whitelist the bridge on `InferenceVerifier.cairo`:**
+### 8. Pre-flight checklist
 
 ```bash
-sncast --account <account> invoke \
-  --url $STARKNET_RPC \
-  --contract-address <CAIRO_CONTRACT_ADDRESS> \
-  --function add_l1_verifier \
-  --calldata <INFERENCE_BRIDGE_ADDRESS_AS_FELT252>
+# Confirm vkey matches current ELF
+cargo prove vkey --elf crates/guest/elf/inference-guest
+# Must match inferenceVKey on contract:
+cast call $INFERENCE_VERIFIER_ADDRESS "inferenceVKey()(bytes32)" --rpc-url https://testnet.hsk.xyz
+
+# Confirm settler is whitelisted
+cast call $INFERENCE_VERIFIER_ADDRESS "isSettler(address)(bool)" $SETTLER_ADDRESS --rpc-url https://testnet.hsk.xyz
+
+# Confirm model is registered
+cast call $INFERENCE_VERIFIER_ADDRESS "isRegisteredModel(bytes32)(bool)" \
+  0x91db243a5b7956c0818e930c6abde3a47b14dd47a71928367409535f04aa32ed \
+  --rpc-url https://testnet.hsk.xyz
 ```
+
+---
+
+## Model Architecture
+
+`tiny_mlp_v1` is a 4→8→2 MLP (58 parameters) used for MVP demonstration. It is designed to validate the full pipeline end-to-end: inference → SP1 proof → on-chain verification → HashKey attestation.
+
+**Weights layout (232 bytes, flat f32 little-endian):**
+
+```
+[0..32]  W1: layer1 weights (4×8)
+[32..40] b1: layer1 biases  (8)
+[40..56] W2: layer2 weights (8×2)
+[56..58] b2: layer2 biases  (2)
+```
+
+**Guest program public values (112 bytes):**
+
+```
+[0..32]   model_id    = sha256(weights_bytes)
+[32..64]  input_hash  = sha256(input_le_bytes)
+[64..96]  output_hash = sha256(output_le_bytes)
+[96..112] output      = raw f32 logits (2 × 4 bytes)
+```
+
+**Attestation hash:** `keccak256(model_id || input_hash || output_hash)` — this is the value emitted on-chain and returned to the client.
 
 ---
 

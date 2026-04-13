@@ -28,14 +28,20 @@ contract Deploy is Script {
     bytes32 constant INFERENCE_VKEY =
         0x00bb7d2c3c965a0188abfb2d674d31e0ba558c62e4e1bad5574afe00545a75fd;
 
+    // Aggregator guest vkey — generated via:
+    // cargo prove vkey --elf target/elf-compilation/riscv64im-succinct-zkvm-elf/release/aggregator-guest
+    bytes32 constant AGGREGATION_VKEY =
+        0x00b766856cc9b7ae52a999b3eef9dd1d16a2d8cfd61e79f6f63ba4ae172038d0;
+
     function run() external {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
         address settlerAddress = vm.envAddress("SETTLER_ADDRESS");
         address deployer = vm.addr(deployerKey);
 
-        console.log("Deployer       :", deployer);
-        console.log("Inference VKey :", vm.toString(INFERENCE_VKEY));
-        console.log("Settler        :", settlerAddress);
+        console.log("Deployer          :", deployer);
+        console.log("Inference VKey    :", vm.toString(INFERENCE_VKEY));
+        console.log("Aggregation VKey  :", vm.toString(AGGREGATION_VKEY));
+        console.log("Settler           :", settlerAddress);
 
         vm.startBroadcast(deployerKey);
 
@@ -48,9 +54,8 @@ contract Deploy is Script {
         console.log("SP1VerifierGateway :", address(gateway));
 
         // 3. Register the Plonk verifier route with the gateway
-        //    addRoute reads VERIFIER_HASH() from the verifier to set the selector
         gateway.addRoute(address(plonkVerifier));
-        console.log("Route registered");
+        console.log("Plonk route registered");
 
         // 4. Deploy InferenceVerifier wrapping the gateway
         InferenceVerifier verifier = new InferenceVerifier(
@@ -63,6 +68,11 @@ contract Deploy is Script {
         // 5. Whitelist the settler
         verifier.setSettler(settlerAddress, true);
         console.log("Settler whitelisted:", settlerAddress);
+
+        // 6. Register the aggregator guest vkey
+        //    Required before submitAggregatedProof() can be called.
+        verifier.setAggregationVKey(AGGREGATION_VKEY);
+        console.log("Aggregation VKey set");
 
         vm.stopBroadcast();
 

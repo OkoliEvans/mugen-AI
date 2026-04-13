@@ -1,35 +1,41 @@
+// crates/prover-manager/src/manager.rs
+
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{anyhow, Result};
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use uuid::Uuid;
 
-use crate::job::{JobState, ProofData};
+use crate::job::{CompressedData, JobState};
 use crate::proving;
 
 #[derive(Debug, Clone)]
 pub struct ProverConfig {
     pub proofs_dir: String,
     pub max_concurrent: usize,
-    /// Wall-clock timeout for the full two-phase pipeline.
-    /// Should be >= 180s (compressed ~60s + Groth16 ~120s).
+    /// Wall-clock timeout for compressed proving only.
+    /// ~60–90s on the Succinct Prover Network. No Groth16 per job.
     pub timeout_secs: u64,
     pub guest_elf_path: String,
     pub weights_path: String,
-    /// How long Done/Failed entries live in memory before eviction.
-    /// In-flight jobs are never evicted. Recommended: 3600s.
+    /// How long Compressed/Failed entries live in memory before eviction.
+    /// Must be >= the aggregator's collection window (default: 3600s).
     pub job_ttl_secs: u64,
 }
 
-type JobMap = Arc<Mutex<HashMap<String, JobState>>>;
-type ProofMap = Arc<Mutex<HashMap<String, ProofData>>>;
-type EvictMap = Arc<Mutex<HashMap<String, std::time::Instant>>>;
+type JobMap        = Arc<Mutex<HashMap<String, JobState>>>;
+type CompressedMap = Arc<Mutex<HashMap<String, CompressedData>>>;
+type EvictMap      = Arc<Mutex<HashMap<String, std::time::Instant>>>;
 
 pub struct ProverManager {
     config: ProverConfig,
     jobs: JobMap,
-    proofs: ProofMap,
+    /// Stores phase 1 output — live SP1ProofWithPublicValues + vk.
+    /// Populated when Compressed state is set.
+    /// Consumed by the aggregator batch collector.
+    /// Evicted on the same TTL as jobs.
+    compressed_proofs: CompressedMap,
     evict: EvictMap,
     semaphore: Arc<tokio::sync::Semaphore>,
 }
@@ -41,20 +47,23 @@ impl ProverManager {
         let mgr = Arc::new(Self {
             config,
             jobs: Arc::new(Mutex::new(HashMap::new())),
-            proofs: Arc::new(Mutex::new(HashMap::new())),
+            compressed_proofs: Arc::new(Mutex::new(HashMap::new())),
             evict: Arc::new(Mutex::new(HashMap::new())),
             semaphore,
         });
 
         // Background TTL eviction — sweeps every 60s.
-        // Only removes Done/Failed entries; in-flight jobs are never touched.
+        // CompressedData entries are evicted alongside jobs. The aggregator
+        // must consume compressed_proofs before TTL, or the batch will be
+        // incomplete. TTL should be set well above the aggregator window.
         {
-            let jobs = Arc::clone(&mgr.jobs);
-            let proofs = Arc::clone(&mgr.proofs);
-            let evict = Arc::clone(&mgr.evict);
-            let ttl = mgr.config.job_ttl_secs;
+            let jobs              = Arc::clone(&mgr.jobs);
+            let compressed_proofs = Arc::clone(&mgr.compressed_proofs);
+            let evict             = Arc::clone(&mgr.evict);
+            let ttl               = mgr.config.job_ttl_secs;
             tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                let mut interval =
+                    tokio::time::interval(std::time::Duration::from_secs(60));
                 loop {
                     interval.tick().await;
                     let now = std::time::Instant::now();
@@ -67,7 +76,7 @@ impl ProverManager {
                     for id in &expired {
                         ev.remove(id);
                         jobs.lock().await.remove(id);
-                        proofs.lock().await.remove(id);
+                        compressed_proofs.lock().await.remove(id);
                         info!(%id, "job evicted after TTL");
                     }
                 }
@@ -79,19 +88,18 @@ impl ProverManager {
 
     /// Submit a job. Returns the job_id immediately.
     ///
-    /// Spawns a background task bounded by config.timeout_secs:
-    ///   Phase 1 (compressed) -> JobState::Compressed  — attestation_hash available
-    ///   Phase 2 (groth16)    -> JobState::Done        — proof written, ready for settlement
+    /// Runs phase 1 (compressed) only. Compressed is the terminal success state.
+    /// The attestation_hash is available as soon as the job reaches Compressed.
     ///
-    /// On phase 2 failure the job is left in Compressed state (not Failed) so
-    /// the gateway can still read the attestation_hash from phase 1.
+    /// The aggregator crate (not this manager) is responsible for collecting N
+    /// CompressedData entries and running one Groth16 for on-chain settlement.
     pub async fn submit(&self, input_data: Vec<Vec<f64>>) -> Result<String> {
         let job_id = Uuid::new_v4().to_string();
-        let config = self.config.clone();
-        let jobs = Arc::clone(&self.jobs);
-        let proofs = Arc::clone(&self.proofs);
-        let evict = Arc::clone(&self.evict);
-        let sem = Arc::clone(&self.semaphore);
+        let config            = self.config.clone();
+        let jobs              = Arc::clone(&self.jobs);
+        let compressed_proofs = Arc::clone(&self.compressed_proofs);
+        let evict             = Arc::clone(&self.evict);
+        let sem               = Arc::clone(&self.semaphore);
         let timeout = std::time::Duration::from_secs(self.config.timeout_secs);
 
         jobs.lock().await.insert(job_id.clone(), JobState::Queued);
@@ -102,111 +110,75 @@ impl ProverManager {
             let result = tokio::time::timeout(timeout, async {
                 let _permit = sem.acquire().await.unwrap();
 
-                jobs.lock().await.insert(job_id_bg.clone(), JobState::Running);
-                info!(%job_id_bg, "job running — starting two-phase proving");
+                jobs.lock()
+                    .await
+                    .insert(job_id_bg.clone(), JobState::Running);
+                info!(%job_id_bg, "job running — compressed proving starting");
 
-                // ── Phase 1: Compressed proof ─────────────────────────────────
-                let phase1_result = proving::prove_compressed(
-                    &config,
-                    &job_id_bg,
-                    input_data.clone(),
-                )
-                .await;
+                // ── Phase 1: Compressed ───────────────────────────────────────
+                // This is the only proving phase per job. No Groth16 here.
+                // The aggregator handles Groth16 for the batch.
+                let phase1_result =
+                    proving::prove_compressed(&config, &job_id_bg, input_data.clone()).await;
 
-                let compressed_data = match phase1_result {
-                    Ok(data) => data,
+                let (compressed_data, raw_compressed_proof) = match phase1_result {
+                    Ok(pair) => pair,
                     Err(e) => {
-                        error!(%job_id_bg, "phase 1 (compressed) failed: {e}");
+                        error!(%job_id_bg, "compressed proving failed: {e}");
                         jobs.lock().await.insert(
                             job_id_bg.clone(),
-                            JobState::Failed { reason: format!("compressed proof failed: {e}") },
+                            JobState::Failed {
+                                reason: format!("compressed proof failed: {e}"),
+                            },
                         );
-                        evict.lock().await.insert(job_id_bg.clone(), std::time::Instant::now());
+                        evict
+                            .lock()
+                            .await
+                            .insert(job_id_bg.clone(), std::time::Instant::now());
                         return;
                     }
                 };
 
                 let attestation_hash = compressed_data.attestation_hash;
+                let vk = compressed_data.vk.clone().expect("vk must be set after phase 1");
+                let public_values = raw_compressed_proof.public_values.to_vec();
+
+                // Store CompressedData — the aggregator batch collector reads this.
+                // Must be stored before setting JobState::Compressed so any
+                // concurrent reader that sees Compressed can immediately fetch data.
+                compressed_proofs.lock().await.insert(
+                    job_id_bg.clone(),
+                    CompressedData {
+                        proof: raw_compressed_proof,
+                        vk,
+                        attestation_hash,
+                        public_values,
+                    },
+                );
+
+                // Compressed is the terminal success state.
                 jobs.lock().await.insert(
                     job_id_bg.clone(),
                     JobState::Compressed { attestation_hash },
                 );
+
+                // Start TTL clock immediately — aggregator must consume
+                // compressed_proofs before job_ttl_secs elapses.
+                evict
+                    .lock()
+                    .await
+                    .insert(job_id_bg.clone(), std::time::Instant::now());
+
                 info!(
                     %job_id_bg,
                     attestation_hash = %hex::encode(attestation_hash),
-                    "phase 1 complete — attestation_hash available"
+                    "compressed proof ready — queued for aggregator batch"
                 );
-
-                // ── Phase 2: Groth16 ─────────────────────────────────────────
-                let phase2_result = proving::prove_groth16(
-                    &config,
-                    &job_id_bg,
-                    input_data,
-                )
-                .await;
-
-                let groth16_data = match phase2_result {
-                    Ok(data) => data,
-                    Err(e) => {
-                        error!(%job_id_bg, "phase 2 (groth16) failed: {e}");
-                        // Leave job in Compressed state — attestation_hash remains
-                        // valid and accessible to the gateway even when Groth16 fails.
-                        warn!(%job_id_bg, "job left in Compressed state — attestation_hash intact");
-                        evict.lock().await.insert(job_id_bg.clone(), std::time::Instant::now());
-                        return;
-                    }
-                };
-
-                // Sanity check: both phases must agree on attestation_hash.
-                if groth16_data.attestation_hash != attestation_hash {
-                    error!(
-                        %job_id_bg,
-                        compressed_hash = %hex::encode(attestation_hash),
-                        groth16_hash    = %hex::encode(groth16_data.attestation_hash),
-                        "attestation_hash mismatch between phases — ELF or weights changed"
-                    );
-                    jobs.lock().await.insert(
-                        job_id_bg.clone(),
-                        JobState::Failed {
-                            reason: "attestation_hash mismatch between compressed and groth16 phases".into(),
-                        },
-                    );
-                    evict.lock().await.insert(job_id_bg.clone(), std::time::Instant::now());
-                    return;
-                }
-
-                let proof_path = format!("{}/{}.bin", config.proofs_dir, job_id_bg);
-                if let Err(e) = tokio::fs::create_dir_all(&config.proofs_dir).await {
-                    error!(%job_id_bg, "failed to create proofs_dir: {e}");
-                    jobs.lock().await.insert(
-                        job_id_bg.clone(),
-                        JobState::Failed { reason: format!("proofs_dir creation failed: {e}") },
-                    );
-                    evict.lock().await.insert(job_id_bg.clone(), std::time::Instant::now());
-                    return;
-                }
-                if let Err(e) = tokio::fs::write(&proof_path, &groth16_data.proof_bytes).await {
-                    error!(%job_id_bg, "failed to write groth16 proof file: {e}");
-                    jobs.lock().await.insert(
-                        job_id_bg.clone(),
-                        JobState::Failed { reason: format!("proof write failed: {e}") },
-                    );
-                    evict.lock().await.insert(job_id_bg.clone(), std::time::Instant::now());
-                    return;
-                }
-
-                proofs.lock().await.insert(job_id_bg.clone(), groth16_data);
-                jobs.lock().await.insert(
-                    job_id_bg.clone(),
-                    JobState::Done { proof_path: proof_path.clone() },
-                );
-                evict.lock().await.insert(job_id_bg.clone(), std::time::Instant::now());
-                info!(%job_id_bg, %proof_path, "phase 2 complete — groth16 proof ready for settlement");
             })
             .await;
 
             if result.is_err() {
-                error!(%job_id_bg, "job timed out");
+                error!(%job_id_bg, "job timed out during compressed proving");
                 jobs.lock().await.insert(
                     job_id_bg.clone(),
                     JobState::Failed {
@@ -223,6 +195,7 @@ impl ProverManager {
         Ok(job_id)
     }
 
+    /// Returns the current state of a job.
     pub async fn status(&self, job_id: &str) -> Result<JobState> {
         self.jobs
             .lock()
@@ -232,39 +205,37 @@ impl ProverManager {
             .ok_or_else(|| anyhow!("job not found: {job_id}"))
     }
 
-    pub async fn read_proof(&self, job_id: &str) -> Result<Vec<u8>> {
-        match self.status(job_id).await? {
-            JobState::Done { proof_path } => tokio::fs::read(&proof_path)
-                .await
-                .map_err(|e| anyhow!("failed to read proof at {proof_path}: {e}")),
-            JobState::Compressed { .. } => Err(anyhow!(
-                "groth16 proof not yet ready — job is in Compressed state"
-            )),
-            _ => Err(anyhow!("proof not available — job is not in Done state")),
-        }
-    }
-
-    pub async fn proof_data(&self, job_id: &str) -> Result<ProofData> {
-        self.proofs
+    /// Returns CompressedData for a job — available after phase 1 completes.
+    ///
+    /// The aggregator uses this to build AggregationInput without re-proving.
+    /// Returns an error if phase 1 is not yet complete or the job was evicted.
+    pub async fn compressed_proof_data(&self, job_id: &str) -> Result<CompressedData> {
+        self.compressed_proofs
             .lock()
             .await
             .get(job_id)
             .cloned()
             .ok_or_else(|| {
-                anyhow!("proof data not found for job '{job_id}' — job may not be Done yet")
+                anyhow!(
+                    "compressed proof data not found for job '{job_id}' \
+                     — phase 1 may not be complete yet, or job was evicted"
+                )
             })
     }
 
+    /// Returns the verifying key for a job — available after phase 1 completes.
+    pub async fn verifying_key(&self, job_id: &str) -> Result<sp1_sdk::SP1VerifyingKey> {
+        let cd = self.compressed_proof_data(job_id).await?;
+        Ok(cd.vk)
+    }
+
+    /// Returns the attestation_hash for a job.
+    ///
+    /// Available as soon as the job reaches JobState::Compressed.
+    /// Returns an error if the job is still proving or has failed.
     pub async fn attestation_hash(&self, job_id: &str) -> Result<[u8; 32]> {
         match self.status(job_id).await? {
             JobState::Compressed { attestation_hash } => Ok(attestation_hash),
-            JobState::Done { .. } => self
-                .proofs
-                .lock()
-                .await
-                .get(job_id)
-                .map(|pd| pd.attestation_hash)
-                .ok_or_else(|| anyhow!("proof data missing for Done job '{job_id}'")),
             JobState::Queued | JobState::Running => Err(anyhow!(
                 "attestation_hash not yet available — job is still proving"
             )),

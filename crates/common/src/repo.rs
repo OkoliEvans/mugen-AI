@@ -7,8 +7,11 @@ use uuid::Uuid;
 use crate::{
     DbPool,
     error::CommonError,
-    models::{Batch, BatchUpdate, Job, JobUpdate, Model, NewBatch, NewJob, NewModel},
-    schema::{batches, jobs, models},
+    models::{
+        AccountStats, Batch, BatchUpdate, Job, JobUpdate, Model, NewBatch, NewJob, NewModel,
+        VaultEvent,
+    },
+    schema::{batches, jobs, models, vault_events},
 };
 
 // ── Models ────────────────────────────────────────────────────────────────────
@@ -214,4 +217,143 @@ pub async fn assign_jobs_to_batch(
     .await
     .map_err(|e| CommonError::Interact(e.to_string()))?
     .map_err(CommonError::Diesel)
+}
+
+/// List jobs ordered by created_at DESC — most recent first.
+/// Used by GET /v1/proofs for the explorer paginated feed.
+pub async fn list_jobs(pool: &DbPool, limit: u64, offset: u64) -> Result<Vec<Job>, CommonError> {
+    let conn = pool.get().await.map_err(CommonError::Pool)?;
+
+    conn.interact(move |conn| -> Result<Vec<Job>, diesel::result::Error> {
+        jobs::table
+            .order(jobs::submitted_at.desc())
+            .limit(limit as i64)
+            .offset(offset as i64)
+            .select(Job::as_select())
+            .load::<Job>(conn)
+    })
+    .await
+    .map_err(|e| CommonError::Interact(e.to_string()))?
+    .map_err(CommonError::Diesel)
+}
+
+pub async fn find_job_by_attestation_hash(
+    pool: &DbPool,
+    attestation_hash: &str,
+) -> Result<Job, CommonError> {
+    let hash = attestation_hash.to_string();
+    let conn = pool.get().await.map_err(CommonError::Pool)?;
+    conn.interact(move |conn| {
+        jobs::table
+            .filter(jobs::attestation_hash.eq(&hash))
+            .select(Job::as_select())
+            .first(conn)
+            .map_err(|e| match e {
+                diesel::result::Error::NotFound => {
+                    CommonError::NotFound(format!("job with attestation_hash {hash} not found"))
+                }
+                other => CommonError::Diesel(other),
+            })
+    })
+    .await
+    .map_err(|e| CommonError::Interact(e.to_string()))?
+}
+
+/// Count proof jobs settled for a given wallet address.
+/// Used by GET /v1/account/:wallet to compute proof_count and hsk_spent.
+pub async fn get_account_stats(pool: &DbPool, wallet: &str) -> Result<AccountStats, CommonError> {
+    let wallet = wallet.to_lowercase();
+    let conn = pool.get().await.map_err(CommonError::Pool)?;
+
+    let proof_count = conn
+        .interact(move |conn| {
+            vault_events::table
+                .filter(vault_events::wallet.eq(wallet))
+                .filter(vault_events::operation.eq("deduct"))
+                .count()
+                .get_result::<i64>(conn)
+        })
+        .await
+        .map_err(|e| CommonError::Interact(e.to_string()))?
+        .map_err(CommonError::Diesel)?;
+
+    Ok(AccountStats { proof_count })
+}
+
+/// Paginated vault event history for a wallet.
+/// Used by GET /v1/account/:wallet/history.
+pub async fn get_account_history(
+    pool: &DbPool,
+    wallet: &str,
+    limit: u64,
+    offset: u64,
+    operation: Option<&str>,
+) -> Result<Vec<VaultEvent>, CommonError> {
+    use crate::schema::vault_events;
+    use diesel::pg::Pg;
+
+    let wallet = wallet.to_lowercase();
+    let operation = operation.map(|s| s.to_string());
+    let conn = pool.get().await.map_err(CommonError::Pool)?;
+
+    conn.interact(
+        move |conn| -> Result<Vec<VaultEvent>, diesel::result::Error> {
+            let mut query = vault_events::table
+                .filter(vault_events::wallet.eq(wallet))
+                .into_boxed::<Pg>();
+
+            if let Some(op) = operation {
+                query = query.filter(vault_events::operation.eq(op));
+            }
+
+            query
+                .order(vault_events::created_at.desc())
+                .limit(limit as i64)
+                .offset(offset as i64)
+                .select(VaultEvent::as_select())
+                .load::<VaultEvent>(conn)
+        },
+    )
+    .await
+    .map_err(|e| CommonError::Interact(e.to_string()))?
+    .map_err(CommonError::Diesel)
+}
+
+/// Insert a vault event (deposit or deduct) into the DB.
+/// Called by the VaultClient after each on-chain tx confirms.
+pub async fn insert_vault_event(
+    pool: &DbPool,
+    wallet: &str,
+    tx_hash: &str,
+    operation: &str,
+    amount_wei: &str,
+    job_id: Option<Uuid>,
+) -> Result<(), CommonError> {
+    // Create a temporary struct or use the model if it supports insertion
+    // For alignment, we'll assume a NewVaultEvent struct exists or use values directly
+    let wallet = wallet.to_lowercase();
+    let tx_hash = tx_hash.to_string();
+    let operation = operation.to_string();
+    let amount_wei = amount_wei.to_string();
+
+    let conn = pool.get().await.map_err(CommonError::Pool)?;
+
+    conn.interact(move |conn| {
+        diesel::insert_into(vault_events::table)
+            .values((
+                vault_events::wallet.eq(wallet),
+                vault_events::tx_hash.eq(tx_hash),
+                vault_events::operation.eq(operation),
+                vault_events::amount_wei.eq(amount_wei),
+                vault_events::job_id.eq(job_id),
+            ))
+            .on_conflict(vault_events::tx_hash)
+            .do_nothing()
+            .execute(conn)
+    })
+    .await
+    .map_err(|e| CommonError::Interact(e.to_string()))?
+    .map_err(CommonError::Diesel)?;
+
+    Ok(())
 }

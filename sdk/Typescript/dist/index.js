@@ -2,12 +2,12 @@
 import axios, { AxiosError } from "axios";
 
 // src/errors.ts
-var ElenxisError = class extends Error {
+var VeilError = class extends Error {
   code;
   cause;
   constructor(code, message, cause) {
     super(message);
-    this.name = "ElenxisError";
+    this.name = "VeilError";
     this.code = code;
     this.cause = cause;
     Object.setPrototypeOf(this, new.target.prototype);
@@ -46,7 +46,7 @@ async function safeRequest(fn, errorCode, context) {
     return await fn();
   } catch (err) {
     const message = err instanceof AxiosError ? `${context}: ${err.response?.data?.error ?? err.message}` : `${context}: ${String(err)}`;
-    throw new ElenxisError(errorCode, message, err);
+    throw new VeilError(errorCode, message, err);
   }
 }
 function sleep(ms) {
@@ -77,7 +77,7 @@ async function pollUntilDone(client, jobId, timeoutMs, intervalMs) {
     );
     if (TERMINAL_STATES.has(job.status)) {
       if (job.status === "failed") {
-        throw new ElenxisError(
+        throw new VeilError(
           "JOB_FAILED",
           `job ${jobId} failed: ${job.reason ?? "unknown reason"}`
         );
@@ -90,7 +90,7 @@ async function pollUntilDone(client, jobId, timeoutMs, intervalMs) {
     }
     await sleep2(intervalMs);
   }
-  throw new ElenxisError(
+  throw new VeilError(
     "TIMEOUT",
     `job ${jobId} did not complete within ${timeoutMs}ms`
   );
@@ -109,37 +109,39 @@ function mapJob2(raw) {
     status: raw.status,
     proofPath: raw.proof_path,
     txHash: raw.tx_hash,
+    attestationHash: raw.attestation_hash,
     reason: raw.reason
   };
 }
-var ElenxisClient = class {
+var VeilClient = class {
   http;
   timeoutMs;
   pollIntervalMs;
   constructor(config) {
     if (!config.gatewayUrl) {
-      throw new ElenxisError("NETWORK_ERROR", "gatewayUrl is required");
+      throw new VeilError("NETWORK_ERROR", "gatewayUrl is required");
     }
     this.http = createHttpClient(config.gatewayUrl, config.maxRetries ?? DEFAULT_MAX_RETRIES2);
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.pollIntervalMs = config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL;
   }
   /**
-   * Submit an inference for ZK verification and wait for on-chain settlement.
+   * Submit an inference for ZK verification and wait for the compressed proof.
    *
    * This is the primary SDK method. It:
    *   1. Submits the inference job to the gateway
-   *   2. Polls until the job reaches 'done' or 'settled' status
-   *   3. Fetches tx_hash from Postgres (retries until available)
-   *   4. Returns the attestation hash and transaction reference
+   *   2. Polls until the job reaches 'done' status (compressed proof ready)
+   *   3. Returns attestationHash immediately — available as soon as proving completes
    *
-   * For StarkNet settlement, set timeoutMs to at least 300_000 (5 min)
-   * to account for the L1→L2 relay latency.
+   * Note: txHash is populated asynchronously after batch settlement. The aggregator
+   * collects N compressed proofs then runs one Groth16 for on-chain settlement.
+   * txHash will be undefined until that batch settles. Poll getJob(jobId) to
+   * check for it, or query isVerified() on the contract directly.
    *
    * @param params.modelId   - Model identifier (must match a registered model)
    * @param params.inputData - 2D array of input values matching the model's input shape
-   * @returns VerifyResult containing jobId, attestationHash, txHash, and elapsedMs
-   * @throws ElenxisError on submission failure, job failure, or timeout
+   * @returns VerifyResult containing jobId, attestationHash, optional txHash, and elapsedMs
+   * @throws VeilError on submission failure, job failure, or timeout
    */
   async verifyInference(params) {
     const startMs = Date.now();
@@ -150,17 +152,13 @@ var ElenxisClient = class {
       this.timeoutMs,
       this.pollIntervalMs
     );
-    if (!job.txHash) {
-      throw new ElenxisError(
-        "JOB_FAILED",
-        `job ${jobId} completed but has no tx_hash \u2014 settlement may have failed`
-      );
-    }
     const attestationHash = await this.fetchAttestationHash(jobId);
     return {
       jobId,
+      status: job.status === "done" ? "verified" : job.status,
       attestationHash,
       txHash: job.txHash,
+      // undefined until batch settles — this is expected
       elapsedMs: Date.now() - startMs
     };
   }
@@ -209,7 +207,10 @@ var ElenxisClient = class {
     );
   }
   /**
-   * Fetch the raw proof bytes for a completed job.
+   * Fetch proof metadata for a completed job.
+   *
+   * Note: per-job Groth16 proof bytes no longer exist. This endpoint returns
+   * the attestation_hash and batch queue status for the job.
    */
   async getProof(jobId) {
     return safeRequest(
@@ -217,12 +218,14 @@ var ElenxisClient = class {
         const { data } = await this.http.get(`/v1/jobs/${jobId}/proof`);
         return {
           jobId: data.job_id,
-          proofHex: data.proof_hex,
-          sizeBytes: data.size_bytes
+          // proofHex repurposed — carries attestation_hash for this endpoint.
+          // Full Groth16 bytes are aggregated per batch, not per job.
+          proofHex: data.attestation_hash ?? "",
+          sizeBytes: 0
         };
       },
       "PROOF_FETCH_FAILED",
-      `fetching proof for job ${jobId}`
+      `fetching proof metadata for job ${jobId}`
     );
   }
   /**
@@ -239,20 +242,22 @@ var ElenxisClient = class {
   }
   // ── Private helpers ────────────────────────────────────────────────────────
   /**
-   * Derives the attestation hash for a completed job from its proof bytes.
-   * Returns the first 32 bytes of the proof hex as a fingerprint.
-   * Full on-chain verification should use isVerified() on the contract directly.
+   * Fetch attestation_hash for a completed job directly from the job status.
+   * The gateway writes attestation_hash to Postgres when status = "proving"
+   * and it is preserved on the "done" row — no proof bytes needed.
    */
   async fetchAttestationHash(jobId) {
     try {
+      const job = await this.getJob(jobId);
+      if (job.attestationHash) return job.attestationHash;
       const proof = await this.getProof(jobId);
-      return `0x${proof.proofHex.slice(0, 64)}`;
+      return proof.proofHex || "";
     } catch {
-      return `0x${Buffer.from(jobId.replace(/-/g, "")).toString("hex").slice(0, 64)}`;
+      return "";
     }
   }
 };
 export {
-  ElenxisClient,
-  ElenxisError
+  VeilClient,
+  VeilError
 };

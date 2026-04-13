@@ -35,15 +35,15 @@
 }
 
 .navBtn {
-  font-family:    var(--mono);
-  font-size:      .75rem;
-  background:     none;
-  border:         none;
-  color:          var(--muted-hi);
-  cursor:         pointer;
-  padding:        0;
+  font-family:     var(--mono);
+  font-size:       .75rem;
+  background:      none;
+  border:          none;
+  color:           var(--muted-hi);
+  cursor:          pointer;
+  padding:         0;
   text-decoration: none;
-  transition:     color .15s;
+  transition:      color .15s;
 }
 .navBtn:hover { color: var(--text); }
 
@@ -123,6 +123,54 @@
   margin-bottom:  .75rem;
 }
 
+/* ── SDK language tabs ── */
+.tabRow {
+  display:       flex;
+  align-items:   center;
+  gap:           .5rem;
+  margin-bottom: 1.5rem;
+  padding:       .25rem;
+  background:    var(--surface);
+  border:        1px solid var(--border);
+  border-radius: 6px;
+  width:         fit-content;
+}
+
+.tab {
+  font-family:   var(--mono);
+  font-size:     .8125rem;
+  font-weight:   500;
+  padding:       .4rem 1rem;
+  border:        none;
+  border-radius: 4px;
+  background:    transparent;
+  color:         var(--muted-hi);
+  cursor:        pointer;
+  transition:    background .15s, color .15s, transform .1s;
+  user-select:   none;
+  letter-spacing: .02em;
+}
+
+.tab:hover {
+  background: var(--border);
+  color:      var(--text);
+  cursor:     pointer;
+}
+
+.tab:active {
+  transform: scale(.97);
+}
+
+.tabActive {
+  background: var(--accent);
+  color:      #000;
+}
+
+.tabActive:hover {
+  background: var(--accent);
+  color:      #000;
+}
+
 /* ── Code blocks ── */
 .codeBlock {
   position:      relative;
@@ -148,18 +196,18 @@
 }
 
 .copyBtn {
-  position:    absolute;
-  top:         .625rem;
-  right:       .625rem;
-  font-family: var(--mono);
-  font-size:   .7rem;
-  background:  var(--border-hi);
-  border:      none;
+  position:      absolute;
+  top:           .625rem;
+  right:         .625rem;
+  font-family:   var(--mono);
+  font-size:     .7rem;
+  background:    var(--border-hi);
+  border:        none;
   border-radius: 3px;
-  color:       var(--muted-hi);
-  padding:     .2rem .5rem;
-  cursor:      pointer;
-  transition:  color .15s, background .15s;
+  color:         var(--muted-hi);
+  padding:       .2rem .5rem;
+  cursor:        pointer;
+  transition:    color .15s, background .15s;
 }
 .copyBtn:hover { color: var(--text); background: var(--border); }
 
@@ -178,18 +226,18 @@
 }
 
 .stepNum {
-  font-family:  var(--mono);
-  font-size:    .7rem;
-  color:        var(--accent-dim);
-  flex-shrink:  0;
-  padding-top:  .125rem;
+  font-family:    var(--mono);
+  font-size:      .7rem;
+  color:          var(--accent-dim);
+  flex-shrink:    0;
+  padding-top:    .125rem;
   letter-spacing: .04em;
 }
 
 .stepTitle {
-  font-size:   .875rem;
-  font-weight: 600;
-  color:       var(--text);
+  font-size:     .875rem;
+  font-weight:   600;
+  color:         var(--text);
   margin-bottom: .2rem;
 }
 
@@ -198,6 +246,48 @@
   color:       var(--muted-hi);
   line-height: 1.5;
 }
+
+/* ── SDK note ── */
+.sdkNote {
+  margin-top:    .75rem;
+  padding:       .625rem .875rem;
+  background:    var(--surface);
+  border-left:   2px solid var(--accent-dim);
+  border-radius: 0 4px 4px 0;
+  font-family:   var(--mono);
+  font-size:     .75rem;
+  color:         var(--muted-hi);
+  line-height:   1.6;
+}
+
+/* ── Architecture note ── */
+.archNote {
+  margin-top:    2rem;
+  padding:       1rem 1.125rem;
+  background:    var(--surface);
+  border:        1px solid var(--border);
+  border-radius: 4px;
+}
+
+.archTitle {
+  font-family:   var(--mono);
+  font-size:     .7rem;
+  font-weight:   500;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color:         var(--muted);
+  margin-bottom: .5rem;
+}
+
+.archBody {
+  font-size:   .8125rem;
+  color:       var(--muted-hi);
+  line-height: 1.65;
+  margin:      0;
+}
+
+.archBody strong { color: var(--text); font-weight: 600; }
+.archBody code   { font-family: var(--mono); font-size: .75rem; color: var(--accent); }
 
 /* ── Gateway info ── */
 .gatewayInfo {
@@ -238,15 +328,15 @@
 
 /* ── Footer ── */
 .footer {
-  margin-top:      auto;
-  padding:         1.5rem 0;
-  border-top:      1px solid var(--border);
-  display:         flex;
-  align-items:     center;
-  gap:             .75rem;
-  font-family:     var(--mono);
-  font-size:       .75rem;
-  color:           var(--muted);
+  margin-top:  auto;
+  padding:     1.5rem 0;
+  border-top:  1px solid var(--border);
+  display:     flex;
+  align-items: center;
+  gap:         .75rem;
+  font-family: var(--mono);
+  font-size:   .75rem;
+  color:       var(--muted);
 }
 
 .footer a { color: var(--muted); text-decoration: none; transition: color .15s; }

@@ -1,8 +1,14 @@
 {
   "compilerOptions": {
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "target": "ES2020",
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2020",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
@@ -11,12 +17,17 @@
     "skipLibCheck": true,
     "isolatedModules": true,
     "esModuleInterop": true,
-    
     /* Monorepo Fixes */
     "baseUrl": ".",
     "paths": {
-      "@mugen/sdk": ["../sdk/src/index.ts"]
+      "@mugen-ai/sdk": [
+        "../sdk/Typescript/src/index.ts"
+      ]
     }
   },
-  "include": ["src", "vite-env.d.ts", "declarations.d.ts"]
+  "include": [
+    "src",
+    "vite-env.d.ts",
+    "declarations.d.ts"
+  ]
 }

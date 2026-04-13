@@ -1,1 +1,1 @@
-test_constructor_revertsOnZeroOwner
+test_constructor_revertZeroOwner|test_receive_revertZeroValue

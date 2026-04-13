@@ -9,8 +9,8 @@ mod tests {
         JobState,
     };
     use std::time::Duration;
-    use tiny_mlp;
     use tokio;
+    use tiny_mlp;
 
     fn test_config() -> ProverConfig {
         ProverConfig {
@@ -49,13 +49,29 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(500)).await;
             let state = manager.status(&job_id).await.expect("status failed");
             match &state {
-                JobState::Done { proof_path } => {
-                    println!("job done — proof at: {proof_path}");
-                    let proof = manager
-                        .read_proof(&job_id)
+                // Compressed is the terminal success state — attestation_hash
+                // is the proof commitment. No proof_path exists per-job.
+                JobState::Compressed { attestation_hash } => {
+                    println!(
+                        "job done — attestation_hash: 0x{}",
+                        hex::encode(attestation_hash)
+                    );
+
+                    // Verify CompressedData is accessible for the aggregator.
+                    let cd = manager
+                        .compressed_proof_data(&job_id)
                         .await
-                        .expect("read_proof failed");
-                    assert!(!proof.is_empty(), "proof bytes should not be empty");
+                        .expect("compressed_proof_data should be available after Compressed");
+
+                    assert_eq!(
+                        cd.attestation_hash, *attestation_hash,
+                        "attestation_hash in CompressedData must match JobState"
+                    );
+                    assert!(
+                        !cd.public_values.is_empty(),
+                        "public_values should not be empty"
+                    );
+
                     break;
                 }
                 JobState::Failed { reason } => panic!("job failed: {reason}"),
@@ -89,16 +105,21 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 let state = manager.status(job_id).await.expect("status failed");
                 match &state {
-                    JobState::Done { .. } => break,
+                    JobState::Compressed { attestation_hash } => {
+                        println!(
+                            "job {job_id} complete — attestation_hash: 0x{}",
+                            hex::encode(attestation_hash)
+                        );
+                        break;
+                    }
                     JobState::Failed { reason } => panic!("job {job_id} failed: {reason}"),
                     _ => {}
                 }
                 attempts += 1;
                 assert!(attempts < 300, "job {job_id} timed out");
             }
-            println!("job {job_id} complete");
         }
 
-        println!("all 4 concurrent jobs completed successfully");
+        println!("all concurrent jobs completed successfully");
     }
 }

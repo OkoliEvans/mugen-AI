@@ -27,6 +27,9 @@ alloy-primitives = { version = "1", default-features = false, features = [
 ] }
 hex = "0.4.3"
 
+[dev-dependencies]
+tiny-mlp = { path = "../models/tiny_mlp" }
+
 [profile.test]
 opt-level = 1
 

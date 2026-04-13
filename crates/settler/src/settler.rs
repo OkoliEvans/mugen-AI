@@ -112,19 +112,15 @@ impl Settler {
             "submitting proof to InferenceVerifier on HashKey testnet"
         );
 
-        // Read proof file written by prover_manager
         let proof_bytes = tokio::fs::read(proof_path).await.map_err(|e| {
             SettlerError::ConfigError(format!("proof file not found at {proof_path}: {e}"))
         })?;
 
-        // Deserialize SP1 proof — bincode matches what proving.rs writes
         let proof: sp1_sdk::SP1ProofWithPublicValues = bincode::deserialize(&proof_bytes)
             .map_err(|e| SettlerError::ConfigError(format!("failed to deserialize proof: {e}")))?;
 
         let raw_proof: Bytes = proof.bytes().into();
         let public_values: Bytes = proof.public_values.to_vec().into();
-
-        // outputHash = keccak256(publicValues) — replay guard key on-chain
         let output_hash: FixedBytes<32> = keccak256(&public_values);
 
         let provider = self.build_provider().await?;
@@ -132,7 +128,6 @@ impl Settler {
             .map_err(|e| SettlerError::InvalidAddress(e.to_string()))?;
         let contract = InferenceVerifier::new(address, &provider);
 
-        // Replay guard
         let already = contract
             .isVerified(output_hash)
             .call()
@@ -199,10 +194,6 @@ impl Settler {
         let shape_u256: Vec<U256> = input_shape.iter().map(|&x| U256::from(x)).collect();
         let input_shape_hash: FixedBytes<32> = keccak256(&shape_u256.abi_encode()).into();
 
-        // modelId = sha256(weights_bytes) — must match exactly what the SP1 guest commits:
-        //   let model_id: [u8; 32] = Sha256::digest(weight_bytes).into();
-        // Using computeModelId() would give keccak256(name+version) which is WRONG —
-        // that function is only a registry lookup helper, not the proof's modelId.
         let model_id: FixedBytes<32> = {
             use sha2::{Digest, Sha256};
             let hash: [u8; 32] = Sha256::digest(weight_bytes).into();
@@ -267,6 +258,16 @@ impl Settler {
         );
 
         Ok(format!("{tx_hash:#x}"))
+    }
+
+    pub async fn submit_aggregated(
+        &self,
+        _proof_path: &str,
+        _output_hashes: &[[u8; 32]],
+    ) -> Result<String, SettlerError> {
+        Err(SettlerError::ConfigError(
+            "aggregated settlement is not implemented in Settler yet".to_string(),
+        ))
     }
 
     // ── Private ───────────────────────────────────────────────────────────────

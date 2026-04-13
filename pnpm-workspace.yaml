@@ -1,3 +1,6 @@
 packages:
-  - 'sdk/Typescript'
-  - 'mugen-ui'
+  - sdk/Typescript
+  - mugen-ui
+
+ignoredBuiltDependencies:
+  - esbuild

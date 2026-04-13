@@ -5,7 +5,7 @@ use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::schema::{batches, jobs, models};
+use crate::schema::{batches, jobs, models, vault_events};
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -112,4 +112,18 @@ pub struct JobUpdate {
     pub tx_hash: Option<String>,
     pub batch_id: Option<Uuid>,
     pub attestation_hash: Option<String>,
+}
+
+
+pub struct AccountStats {
+    pub proof_count: i64,
+}
+#[derive(Debug, Clone, Serialize, Queryable, Selectable)]
+#[diesel(table_name = vault_events)]
+pub struct VaultEvent {
+    pub tx_hash:    String,
+    pub operation:  String,
+    pub amount_wei: String,
+    pub created_at: chrono::DateTime<Utc>,
+    pub job_id:     Option<Uuid>,
 }

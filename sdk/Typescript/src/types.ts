@@ -1,6 +1,6 @@
 // ── Job lifecycle ─────────────────────────────────────────────────────────────
 
-export type JobStatus = 'queued' | 'running' | 'done' | 'settled' | 'failed';
+export type JobStatus = "queued" | "running" | "done" | "settled" | "failed";
 
 export interface Job {
   /** Unique job identifier (UUID) */
@@ -11,6 +11,7 @@ export interface Job {
   proofPath?: string;
   /** On-chain transaction hash (populated after settlement) */
   txHash?: string;
+  attestationHash?: string;
   /** Failure reason (populated when failed) */
   reason?: string;
 }
@@ -27,7 +28,7 @@ export interface Attestation {
   /** keccak256 of the output data — the on-chain attestation key */
   outputHash: string;
   /** Status of the on-chain proof */
-  status: 'settled' | 'pending' | 'failed';
+  status: "settled" | "pending" | "failed";
 }
 
 // ── verifyInference result ────────────────────────────────────────────────────
@@ -36,7 +37,7 @@ export interface VerifyResult {
   /** Unique job identifier */
   jobId: string;
   /** Status of the verification */
-  status: 'pending' | 'verified' | 'failed';
+  status: "pending" | "verified" | "failed";
   /** keccak256 of the output data used as the attestation key on-chain */
   attestationHash: string;
   /** On-chain transaction hash of the settled proof */
@@ -80,9 +81,9 @@ export interface VeilConfig {
 // ── Errors ────────────────────────────────────────────────────────────────────
 
 export type VeilErrorCode =
-  | 'SUBMIT_FAILED'
-  | 'POLL_FAILED'
-  | 'JOB_FAILED'
-  | 'TIMEOUT'
-  | 'PROOF_FETCH_FAILED'
-  | 'NETWORK_ERROR';
+  | "SUBMIT_FAILED"
+  | "POLL_FAILED"
+  | "JOB_FAILED"
+  | "TIMEOUT"
+  | "PROOF_FETCH_FAILED"
+  | "NETWORK_ERROR";

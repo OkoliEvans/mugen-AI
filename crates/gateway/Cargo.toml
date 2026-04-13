@@ -8,6 +8,7 @@ name = "gateway"
 path = "src/main.rs"
 
 [dependencies]
+aggregator      = { path = "../aggregator" }
 prover-manager = { path = "../prover-manager" }
 settler        = { path = "../settler" }
 common         = { path = "../common" }
@@ -15,6 +16,8 @@ ipfs           = { path = "../ipfs" }
 
 hex                = "0.4"
 actix-web          = "4"
+sp1-sdk = { version = "6.0.0-beta.1", features = ["network", "blocking"] }
+bincode = "1"
 alloy        = { version = "1", features = ["full"] }
 tokio              = { version = "1", features = ["full"] }
 serde              = { version = "1", features = ["derive"] }

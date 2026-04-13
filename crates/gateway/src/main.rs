@@ -1,32 +1,10 @@
-// gateway/src/main.rs
-
 //! Veil Gateway — Actix-Web HTTP API
-//!
-//! Endpoints:
-//!   POST   /v1/models          — register a model (IPFS + on-chain)
-//!   POST   /v1/jobs            — submit inference job
-//!   GET    /v1/jobs/{id}       — poll job status
-//!   GET    /v1/jobs/{id}/proof — fetch proof bytes (hex)
-//!   GET    /healthz            — liveness check
-//!
-//! Job lifecycle:
-//!   queued → running → proving → done → settled
-//!
-//!   proving = phase 1 (compressed STARK) complete, attestation_hash available
-//!   done    = phase 2 (groth16 SNARK) complete, proof ready for on-chain settlement
-//!
-//! In-memory prover-manager is the source of truth for in-flight jobs.
-//! Postgres is the durable record for all completed jobs.
 
 use std::sync::Arc;
 
 use actix_cors::Cors;
 use actix_web::{
-    get,
-    http::header,
-    post,
-    web::{Data, Json, Path},
-    App, HttpResponse, HttpServer, Responder,
+    App, HttpResponse, HttpServer, Responder, get, http::header, post, web::{Data, Json, Path, Query}
 };
 use chrono::Utc;
 use common::{
@@ -41,9 +19,72 @@ use prover_manager::{
 use serde::{Deserialize, Serialize};
 use settler::{config::SettlerConfig, settler::Settler};
 use sha2::{Digest, Sha256};
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+
+#[derive(Debug, Serialize)]
+struct AccountResponse {
+    wallet: String,
+    vault_balance_wei: String,
+    vault_balance_hsk: String,
+    proof_count: i64,
+    hsk_spent: String,
+    proofs_remaining: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct HistoryEntryResponse {
+    tx_hash: String,
+    operation: String,
+    amount: String,
+    timestamp: String,
+    job_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HistoryQuery {
+    #[serde(default = "default_page")]
+    page: u64,
+    #[serde(default = "default_limit")]
+    limit: u64,
+    operation: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RecordVaultEventRequest {
+    tx_hash: String,
+    amount_wei: String,
+    operation: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ProofListItem {
+    job_id: String,
+    status: String,
+    model_id: String,
+    attestation_hash: Option<String>,
+    tx_hash: Option<String>,
+    input_hash: String,
+    completed_at: Option<String>,
+    settled_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProofListQuery {
+    #[serde(default = "default_page")]
+    page: u64,
+    #[serde(default = "default_limit")]
+    limit: u64,
+}
+
+fn default_page() -> u64 {
+    1
+}
+fn default_limit() -> u64 {
+    20
+}
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -69,6 +110,87 @@ fn prover_config() -> ProverConfig {
     }
 }
 
+struct BatchConfig {
+    batch_size: usize,
+    flush_secs: u64,
+    agg_elf_path: String,
+}
+
+impl BatchConfig {
+    fn from_env() -> Self {
+        Self {
+            batch_size: std::env::var("BATCH_SIZE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
+            flush_secs: std::env::var("BATCH_FLUSH_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
+            agg_elf_path: std::env::var("AGG_ELF_PATH")
+                .unwrap_or_else(|_| "crates/aggregator-guest/elf/aggregator-guest".into()),
+        }
+    }
+}
+
+// ── Batch collector ───────────────────────────────────────────────────────────
+
+struct BatchCollector {
+    /// (job_id, AggregationInput) so we can update DB rows after settlement.
+    pending: Mutex<Vec<(Uuid, aggregator::AggregationInput)>>,
+    batch_size: usize,
+    flush_secs: u64,
+    agg_elf: Vec<u8>,
+}
+
+impl BatchCollector {
+    async fn new(cfg: &BatchConfig) -> anyhow::Result<Arc<Self>> {
+        let agg_elf = tokio::fs::read(&cfg.agg_elf_path).await.map_err(|e| {
+            anyhow::anyhow!(
+                "failed to read aggregator ELF at '{}': {e}",
+                cfg.agg_elf_path
+            )
+        })?;
+
+        info!(
+            batch_size   = cfg.batch_size,
+            flush_secs   = cfg.flush_secs,
+            agg_elf_path = %cfg.agg_elf_path,
+            "batch collector initialised"
+        );
+
+        Ok(Arc::new(Self {
+            pending: Mutex::new(Vec::new()),
+            batch_size: cfg.batch_size,
+            flush_secs: cfg.flush_secs,
+            agg_elf,
+        }))
+    }
+
+    /// Push one proof. Returns `Some(batch)` when threshold is reached.
+    async fn push(
+        &self,
+        db_job_id: Uuid,
+        input: aggregator::AggregationInput,
+    ) -> Option<Vec<(Uuid, aggregator::AggregationInput)>> {
+        let mut pending = self.pending.lock().await;
+        pending.push((db_job_id, input));
+        if pending.len() >= self.batch_size {
+            Some(std::mem::take(&mut *pending))
+        } else {
+            None
+        }
+    }
+
+    async fn flush(&self) -> Vec<(Uuid, aggregator::AggregationInput)> {
+        std::mem::take(&mut *self.pending.lock().await)
+    }
+
+    async fn pending_count(&self) -> usize {
+        self.pending.lock().await.len()
+    }
+}
+
 // ── Shared state ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -77,8 +199,9 @@ struct AppState {
     settler: Arc<Settler>,
     pool: Arc<DbPool>,
     settle_enabled: bool,
-    /// None when PINATA_JWT is not set — model registration will return 503.
     ipfs_client: Option<Arc<PinataClient>>,
+    batch_collector: Arc<BatchCollector>,
+    vault: Option<Arc<settler::vault::VaultClient>>,
 }
 
 // ── Request / response types ──────────────────────────────────────────────────
@@ -88,6 +211,7 @@ struct SubmitRequest {
     input_data: Vec<Vec<f64>>,
     #[serde(default = "default_model_id")]
     model_id: String,
+    wallet_address: Option<String>,
 }
 
 fn default_model_id() -> String {
@@ -131,15 +255,10 @@ struct RegisterModelRequest {
 
 #[derive(Debug, Serialize)]
 struct RegisterModelResponse {
-    /// Postgres UUID for this model row.
     model_id: String,
-    /// keccak256(name + version) — the on-chain registry key.
     on_chain_model_id: String,
-    /// IPFS CID of the pinned model artifact.
     ipfs_cid: String,
-    /// Public gateway URL for the pinned artifact.
     gateway_url: String,
-    /// Transaction hash of the on-chain registerModel() call.
     on_chain_hash: String,
 }
 
@@ -160,10 +279,8 @@ fn err(msg: impl Into<String>) -> Json<ErrorResponse> {
     Json(ErrorResponse { error: msg.into() })
 }
 
-// ── Model upsert — lazy registration ─────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Look up a model by name. If not found, insert a placeholder record.
-/// If found but input_shape is still empty (legacy placeholder), patch it.
 async fn upsert_model(
     pool: &DbPool,
     name: &str,
@@ -203,23 +320,103 @@ async fn upsert_model(
         .map_err(|e| e.to_string())
 }
 
-/// Compute SHA-256 of the raw input bytes, returned as hex string.
 fn hash_input(input_data: &[Vec<f64>]) -> String {
     let bytes = serde_json::to_vec(input_data).unwrap_or_default();
-    let digest = Sha256::digest(&bytes);
-    hex::encode(digest)
+    hex::encode(Sha256::digest(&bytes))
+}
+
+// ── Aggregation + settlement ──────────────────────────────────────────────────
+
+/// Aggregate a batch and settle on-chain.
+/// After settlement, updates every job row in the batch to status="settled".
+async fn settle_batch(
+    batch: Vec<(Uuid, aggregator::AggregationInput)>,
+    agg_elf: &[u8],
+    settler: &Arc<Settler>,
+    pool: &Arc<DbPool>,
+) {
+    let count = batch.len();
+    info!(count, "aggregating proof batch");
+
+    // Split db_job_ids from AggregationInputs
+    let (db_job_ids, inputs): (Vec<Uuid>, Vec<aggregator::AggregationInput>) =
+        batch.into_iter().unzip();
+
+    let agg_data = match aggregator::aggregate_proofs(agg_elf, inputs).await {
+        Ok(d) => d,
+        Err(e) => {
+            error!(count, "aggregation failed: {e}");
+            return;
+        }
+    };
+
+    let merkle_root = hex::encode(aggregator::merkle_root(&agg_data.output_hashes));
+    info!(
+        count,
+        batch_size  = agg_data.batch_size,
+        merkle_root = %merkle_root,
+        "aggregation complete — settling on-chain"
+    );
+
+    let proof_path = format!("/tmp/mugen-proofs/agg_{}.bin", Uuid::new_v4());
+    if let Err(e) = tokio::fs::create_dir_all("/tmp/mugen-proofs").await {
+        error!("failed to create proofs dir: {e}");
+        return;
+    }
+    if let Err(e) = tokio::fs::write(&proof_path, &agg_data.proof_bytes).await {
+        error!("failed to write aggregated proof to {proof_path}: {e}");
+        return;
+    }
+
+    let tx_hash = match settler
+        .submit_aggregated(&proof_path, &agg_data.output_hashes)
+        .await
+    {
+        Ok(h) if h == "already-verified" => {
+            warn!(count, "aggregated batch already settled — skipping");
+            let _ = tokio::fs::remove_file(&proof_path).await;
+            return;
+        }
+        Ok(h) => {
+            info!(count, tx_hash = %h, merkle_root = %merkle_root, "batch settled on-chain ✓");
+            h
+        }
+        Err(e) => {
+            error!(count, "batch settlement failed: {e}");
+            let _ = tokio::fs::remove_file(&proof_path).await;
+            return;
+        }
+    };
+
+    let _ = tokio::fs::remove_file(&proof_path).await;
+
+    // ── Update every job in this batch to settled ─────────────────────────────
+    for db_job_id in &db_job_ids {
+        if let Err(e) = repo::update_job(
+            pool,
+            *db_job_id,
+            JobUpdate {
+                status: "settled".into(),
+                proof_path: None,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                settled_at: Some(Utc::now()),
+                tx_hash: Some(tx_hash.clone()),
+                batch_id: None,
+                attestation_hash: None,
+            },
+        )
+        .await
+        {
+            error!(job_id = %db_job_id, "DB update to settled failed: {e}");
+        } else {
+            info!(job_id = %db_job_id, %tx_hash, "job marked settled in DB");
+        }
+    }
 }
 
 // ── Settlement background task ────────────────────────────────────────────────
-
-/// Spawned after job submission. Tracks the job through both proving phases
-/// and persists every state transition to Postgres.
-///
-/// Two-phase lifecycle:
-///   Phase 1 (Compressed ~30-60s):
-///     attestation_hash available → persisted immediately with status "proving"
-///   Phase 2 (Groth16 ~90-120s):
-///     proof_path written → status "done" → on-chain settlement triggered
 fn spawn_settler(
     state: AppState,
     job_id: String,
@@ -227,10 +424,10 @@ fn spawn_settler(
     model_name: String,
     model_version: String,
     input_data: Vec<Vec<f64>>,
+    wallet_address: Option<String>,
 ) {
     tokio::spawn(async move {
-        // Mark job as running in Postgres
-        let _ = repo::update_job(
+        if let Err(e) = repo::update_job(
             &state.pool,
             db_job_id,
             JobUpdate {
@@ -245,71 +442,184 @@ fn spawn_settler(
                 attestation_hash: None,
             },
         )
-        .await;
+        .await
+        {
+            error!(%job_id, %db_job_id, "DB update to running failed: {e}");
+        }
 
-        // ── Poll through both proving phases ──────────────────────────────────
-        //
-        // Phase 1 (Compressed) → JobState::Compressed
-        //   Persist attestation_hash immediately with status "proving".
-        //   The API can return attestation_hash to callers without waiting
-        //   for Groth16 to complete.
-        //
-        // Phase 2 (Groth16) → JobState::Done
-        //   Proof file written to disk. Trigger on-chain settlement.
-        //
-        // Poll at 500ms intervals. 480 attempts = 240s budget.
-        // Covers compressed (~60s) + groth16 (~120s) + network headroom.
-        let proof_path = {
-            let mut attempts = 0u32;
-            let max_attempts = 480u32;
-            let mut attestation_persisted = false;
+        let mut attempts = 0u32;
+        let max_attempts = 480u32;
 
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                attempts += 1;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            attempts += 1;
 
-                match state.manager.status(&job_id).await {
-                    // Phase 1 complete — persist attestation_hash, keep polling
-                    Ok(JobState::Compressed { attestation_hash }) => {
-                        if !attestation_persisted {
-                            let hash_hex = format!("0x{}", hex::encode(attestation_hash));
-                            info!(%job_id, attestation_hash = %hash_hex, "phase 1 complete — persisting attestation_hash");
+            match state.manager.status(&job_id).await {
+                Ok(JobState::Compressed { attestation_hash }) => {
+                    let hash_hex = format!("0x{}", hex::encode(attestation_hash));
+                    info!(
+                        %job_id,
+                        attestation_hash = %hash_hex,
+                        "compressed proof ready — persisting attestation_hash"
+                    );
 
-                            let _ = repo::update_job(
-                                &state.pool,
-                                db_job_id,
-                                JobUpdate {
-                                    status: "proving".into(),
-                                    proof_path: None,
-                                    error: None,
-                                    started_at: None,
-                                    completed_at: None,
-                                    settled_at: None,
-                                    tx_hash: None,
-                                    batch_id: None,
-                                    attestation_hash: Some(hash_hex),
-                                },
-                            )
-                            .await;
-
-                            attestation_persisted = true;
-                        }
-                        // Continue polling — waiting for Groth16 (phase 2)
+                    // Persist proving status + attestation_hash
+                    if let Err(e) = repo::update_job(
+                        &state.pool,
+                        db_job_id,
+                        JobUpdate {
+                            status: "proving".into(),
+                            proof_path: None,
+                            error: None,
+                            started_at: None,
+                            completed_at: None,
+                            settled_at: None,
+                            tx_hash: None,
+                            batch_id: None,
+                            attestation_hash: Some(hash_hex.clone()),
+                        },
+                    )
+                    .await
+                    {
+                        error!(%job_id, %db_job_id, "DB update to proving failed: {e}");
                     }
 
-                    // Phase 2 complete — break with proof_path for settlement
-                    Ok(JobState::Done { proof_path }) => break proof_path,
+                    // ── Fee deduction ─────────────────────────────────────────────────
+                    // Deduct AFTER proof is submitted to Succinct — not before.
+                    // Failed proofs never reach Compressed state so users are never
+                    // charged for proofs that didn't succeed.
+                    if let (Some(vault), Some(wallet)) = (&state.vault, &wallet_address) {
+                        match vault
+                            .deduct_fee(wallet, settler::vault::ProofTier::Standard, &job_id)
+                            .await
+                        {
+                            Ok(fee_tx) => {
+                                info!(%job_id, %fee_tx, "vault fee deducted");
+                                // Record the deduct event so vault_events is populated
+                                // and GET /v1/account/:wallet/history returns real data.
+                                if let Err(e) = repo::insert_vault_event(
+                                    &state.pool,
+                                    wallet,
+                                    &fee_tx,
+                                    "deduct",
+                                    "2000000000000000000", // 2 HSK in wei
+                                    Some(db_job_id),
+                                )
+                                .await
+                                {
+                                    warn!(%job_id, "insert_vault_event failed: {e}");
+                                }
+                            }
+                            Err(e) => {
+                                // Log but don't fail the proof — it's already proven.
+                                // This should not happen if the balance check at
+                                // submit_job time passed.
+                                error!(%job_id, "vault fee deduction failed: {e} — proof continues");
+                            }
+                        }
+                    }
 
-                    // Terminal failure at any phase
-                    Ok(JobState::Failed { reason }) => {
-                        warn!(%job_id, %reason, "job failed — persisting to DB");
-                        let _ = repo::update_job(
+                    // ── Push to batch collector ───────────────────────────────────────
+                    if state.settle_enabled && std::env::var("SP1_PROVER").as_deref() != Ok("mock")
+                    {
+                        match state.manager.compressed_proof_data(&job_id).await {
+                            Ok(cd) => {
+                                let agg_input = aggregator::AggregationInput {
+                                    proof: cd.proof,
+                                    vk: cd.vk,
+                                };
+
+                                let pending = state.batch_collector.pending_count().await + 1;
+                                info!(
+                                    %job_id,
+                                    pending,
+                                    batch_size = state.batch_collector.batch_size,
+                                    "pushing proof to batch collector"
+                                );
+
+                                if let Some(batch) =
+                                    state.batch_collector.push(db_job_id, agg_input).await
+                                {
+                                    info!(
+                                        count = batch.len(),
+                                        "batch threshold reached — spawning aggregation"
+                                    );
+                                    let elf = state.batch_collector.agg_elf.clone();
+                                    let settler = Arc::clone(&state.settler);
+                                    let pool = Arc::clone(&state.pool);
+                                    tokio::spawn(async move {
+                                        settle_batch(batch, &elf, &settler, &pool).await;
+                                    });
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    %job_id,
+                                    "compressed_proof_data not available after Compressed: {e}"
+                                );
+                            }
+                        }
+                    }
+
+                    // Mark done — settle_batch will update to "settled" after batch lands
+                    if let Err(e) = repo::update_job(
+                        &state.pool,
+                        db_job_id,
+                        JobUpdate {
+                            status: "done".into(),
+                            proof_path: None,
+                            error: None,
+                            started_at: None,
+                            completed_at: Some(Utc::now()),
+                            settled_at: None,
+                            tx_hash: None,
+                            batch_id: None,
+                            attestation_hash: Some(hash_hex),
+                        },
+                    )
+                    .await
+                    {
+                        error!(%job_id, %db_job_id, "DB update to done failed: {e}");
+                    }
+
+                    info!(%job_id, "job complete — queued in aggregator batch");
+                    return;
+                }
+
+                Ok(JobState::Failed { reason }) => {
+                    warn!(%job_id, %reason, "job failed — persisting to DB");
+                    if let Err(e) = repo::update_job(
+                        &state.pool,
+                        db_job_id,
+                        JobUpdate {
+                            status: "failed".into(),
+                            proof_path: None,
+                            error: Some(reason),
+                            started_at: None,
+                            completed_at: Some(Utc::now()),
+                            settled_at: None,
+                            tx_hash: None,
+                            batch_id: None,
+                            attestation_hash: None,
+                        },
+                    )
+                    .await
+                    {
+                        error!(%job_id, %db_job_id, "DB update to failed: {e}");
+                    }
+                    return;
+                }
+
+                Ok(_) => {
+                    if attempts >= max_attempts {
+                        warn!(%job_id, "settler timed out waiting for compressed proof");
+                        if let Err(e) = repo::update_job(
                             &state.pool,
                             db_job_id,
                             JobUpdate {
                                 status: "failed".into(),
                                 proof_path: None,
-                                error: Some(reason),
+                                error: Some("prover timeout — exceeded max poll attempts".into()),
                                 started_at: None,
                                 completed_at: Some(Utc::now()),
                                 settled_at: None,
@@ -318,159 +628,18 @@ fn spawn_settler(
                                 attestation_hash: None,
                             },
                         )
-                        .await;
-                        return;
-                    }
-
-                    // Still Queued or Running — check timeout
-                    Ok(_) => {
-                        if attempts >= max_attempts {
-                            warn!(%job_id, "settler timed out waiting for Groth16 proof");
-                            let _ = repo::update_job(
-                                &state.pool,
-                                db_job_id,
-                                JobUpdate {
-                                    status: "failed".into(),
-                                    proof_path: None,
-                                    error: Some(
-                                        "prover timeout — exceeded max poll attempts".into(),
-                                    ),
-                                    started_at: None,
-                                    completed_at: Some(Utc::now()),
-                                    settled_at: None,
-                                    tx_hash: None,
-                                    batch_id: None,
-                                    attestation_hash: None,
-                                },
-                            )
-                            .await;
-                            return;
+                        .await
+                        {
+                            error!(%job_id, %db_job_id, "DB update to timeout-failed: {e}");
                         }
-                    }
-
-                    Err(e) => {
-                        error!(%job_id, "settler: status poll error: {e}");
                         return;
                     }
                 }
-            }
-        };
 
-        // Both phases complete. Fetch attestation_hash from Groth16 ProofData
-        // (canonical source after phase 2 — cross-checks phase 1 value).
-        let attestation_hash_hex = match state.manager.proof_data(&job_id).await {
-            Ok(pd) => {
-                let hex = format!("0x{}", hex::encode(pd.attestation_hash));
-                info!(%job_id, attestation_hash = %hex, "groth16 attestation_hash confirmed");
-                Some(hex)
-            }
-            Err(e) => {
-                warn!(%job_id, "could not fetch proof_data after Done: {e}");
-                None
-            }
-        };
-
-        // Persist Done — proof_path + confirmed attestation_hash
-        let _ = repo::update_job(
-            &state.pool,
-            db_job_id,
-            JobUpdate {
-                status: "done".into(),
-                proof_path: Some(proof_path.clone()),
-                error: None,
-                started_at: None,
-                completed_at: Some(Utc::now()),
-                settled_at: None,
-                tx_hash: None,
-                batch_id: None,
-                attestation_hash: attestation_hash_hex,
-            },
-        )
-        .await;
-
-        info!(%job_id, %proof_path, "groth16 proof ready — submitting on-chain");
-
-        if !state.settle_enabled {
-            return;
-        }
-
-        // Mock proofs have empty bytes and will always revert on-chain.
-        // Only submit real network proofs.
-        if std::env::var("SP1_PROVER").as_deref() == Ok("mock") {
-            warn!(%job_id, "SP1_PROVER=mock — skipping settlement (mock proof has no real bytes)");
-            return;
-        }
-
-        let input_bytes = serde_json::to_vec(&input_data).unwrap_or_default();
-        let output_bytes = job_id.as_bytes().to_vec();
-
-        match state
-            .settler
-            .submit(
-                &proof_path,
-                &model_name,
-                &model_version,
-                &input_bytes,
-                &output_bytes,
-            )
-            .await
-        {
-            Ok(tx_hash) if tx_hash == "already-verified" => {
-                warn!(%job_id, "proof already verified on HashKey — skipping");
-                let _ = repo::update_job(
-                    &state.pool,
-                    db_job_id,
-                    JobUpdate {
-                        status: "settled".into(),
-                        proof_path: None,
-                        error: None,
-                        started_at: None,
-                        completed_at: None,
-                        settled_at: Some(Utc::now()),
-                        tx_hash: Some("already-verified".into()),
-                        batch_id: None,
-                        attestation_hash: None,
-                    },
-                )
-                .await;
-            }
-            Ok(tx_hash) => {
-                info!(%job_id, %tx_hash, "proof settled on HashKey testnet");
-                let _ = repo::update_job(
-                    &state.pool,
-                    db_job_id,
-                    JobUpdate {
-                        status: "settled".into(),
-                        proof_path: None,
-                        error: None,
-                        started_at: None,
-                        completed_at: None,
-                        settled_at: Some(Utc::now()),
-                        tx_hash: Some(tx_hash),
-                        batch_id: None,
-                        attestation_hash: None,
-                    },
-                )
-                .await;
-            }
-            Err(e) => {
-                error!(%job_id, "settlement failed: {e}");
-                let _ = repo::update_job(
-                    &state.pool,
-                    db_job_id,
-                    JobUpdate {
-                        status: "failed".into(),
-                        proof_path: None,
-                        error: Some(format!("settlement: {e}")),
-                        started_at: None,
-                        completed_at: None,
-                        settled_at: None,
-                        tx_hash: None,
-                        batch_id: None,
-                        attestation_hash: None,
-                    },
-                )
-                .await;
+                Err(e) => {
+                    error!(%job_id, "settler: status poll error: {e}");
+                    return;
+                }
             }
         }
     });
@@ -599,6 +768,11 @@ async fn register_model(
 
     info!(model_name = %req.name, %on_chain_hash, "model registered on HashKey testnet");
 
+    // FIX: both ipfs_cid and on_chain_hash are moved into the Ok arm's
+    // RegisterModelResponse. Clone them so the Err arm can still use them.
+    let ipfs_cid_for_err = ipfs_cid.clone();
+    let on_chain_hash_for_err = on_chain_hash.clone();
+
     match upsert_registered_model(
         &state.pool,
         &req.name,
@@ -623,16 +797,14 @@ async fn register_model(
             error!(model_name = %req.name, "DB persist failed after on-chain registration: {e}");
             HttpResponse::MultiStatus().json(serde_json::json!({
                 "warning":       "model registered on-chain but DB update failed",
-                "ipfs_cid":      ipfs_cid,
-                "on_chain_hash": on_chain_hash,
+                "ipfs_cid":      ipfs_cid_for_err,       // clone used here
+                "on_chain_hash": on_chain_hash_for_err,  // clone used here
                 "error":         e,
             }))
         }
     }
 }
 
-/// Upsert the model row with confirmed IPFS CID and on-chain hash.
-/// Returns (postgres_uuid, on_chain_model_id_hex).
 async fn upsert_registered_model(
     pool: &DbPool,
     name: &str,
@@ -703,10 +875,45 @@ async fn submit_job(state: Data<AppState>, Json(req): Json<SubmitRequest>) -> im
         return HttpResponse::BadRequest().json(err("input_data must not be empty"));
     }
 
+    // ── VeilVault balance check ───────────────────────────────────────────────
+    if let Some(vault) = &state.vault {
+        match &req.wallet_address {
+            None => {
+                return HttpResponse::BadRequest().json(err(
+                    "wallet_address is required when VeilVault fee collection is enabled",
+                ));
+            }
+            Some(wallet) => {
+                match vault
+                    .check_balance(wallet, settler::vault::ProofTier::Standard)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let balance = vault
+                            .balance_of(wallet)
+                            .await
+                            .map(|b| b.to_string())
+                            .unwrap_or_else(|_| "0".into());
+                        return HttpResponse::PaymentRequired().json(serde_json::json!({
+                            "error":    "insufficient VeilVault balance",
+                            "required": "2000000000000000000",
+                            "balance":  balance,
+                            "hint":     "deposit HSK via VeilVault.deposit{value: N ether}()"
+                        }));
+                    }
+                    Err(e) => {
+                        warn!("vault balance check failed for {wallet}: {e} — allowing job");
+                    }
+                }
+            }
+        }
+    }
+
     let model_name = req.model_id.clone();
     let input_data = req.input_data.clone();
+    let wallet_address = req.wallet_address.clone();
 
-    // 1. Resolve model UUID
     let (model_uuid, model_version) =
         match upsert_model(&state.pool, &model_name, &input_data).await {
             Ok(v) => v,
@@ -717,7 +924,6 @@ async fn submit_job(state: Data<AppState>, Json(req): Json<SubmitRequest>) -> im
             }
         };
 
-    // 2. Submit to in-memory prover-manager
     let job_id = match state.manager.submit(input_data.clone()).await {
         Ok(id) => id,
         Err(e) => {
@@ -726,7 +932,6 @@ async fn submit_job(state: Data<AppState>, Json(req): Json<SubmitRequest>) -> im
         }
     };
 
-    // 3. Parse job_id as UUID
     let db_job_id = match Uuid::parse_str(&job_id) {
         Ok(id) => id,
         Err(e) => {
@@ -735,7 +940,6 @@ async fn submit_job(state: Data<AppState>, Json(req): Json<SubmitRequest>) -> im
         }
     };
 
-    // 4. Persist job record to Postgres
     let input_hash = hash_input(&input_data);
     let new_job = NewJob {
         id: db_job_id,
@@ -750,7 +954,7 @@ async fn submit_job(state: Data<AppState>, Json(req): Json<SubmitRequest>) -> im
 
     info!(%job_id, %model_name, "job submitted and persisted");
 
-    // 5. Spawn background settler — tracks both proving phases
+    // FIX: pass wallet_address as the 7th argument
     spawn_settler(
         state.get_ref().clone(),
         job_id.clone(),
@@ -758,6 +962,7 @@ async fn submit_job(state: Data<AppState>, Json(req): Json<SubmitRequest>) -> im
         model_name,
         model_version,
         input_data,
+        wallet_address,
     );
 
     HttpResponse::Accepted().json(SubmitResponse {
@@ -767,8 +972,6 @@ async fn submit_job(state: Data<AppState>, Json(req): Json<SubmitRequest>) -> im
 }
 
 /// GET /v1/jobs/{id}
-/// Always prefers Postgres — in-memory fallback only when Postgres has no record yet.
-/// Returns attestation_hash as soon as phase 1 completes (status = "proving").
 #[get("/v1/jobs/{id}")]
 async fn get_job_status(state: Data<AppState>, path: Path<String>) -> impl Responder {
     let job_id_str = path.into_inner();
@@ -780,7 +983,6 @@ async fn get_job_status(state: Data<AppState>, path: Path<String>) -> impl Respo
         }
     };
 
-    // Postgres is the durable source — includes attestation_hash once "proving"
     if let Ok(job) = repo::find_job(&state.pool, db_id).await {
         return HttpResponse::Ok().json(JobStatusResponse {
             job_id: job_id_str,
@@ -792,7 +994,6 @@ async fn get_job_status(state: Data<AppState>, path: Path<String>) -> impl Respo
         });
     }
 
-    // In-memory fallback — job not yet flushed to Postgres
     match state.manager.status(&job_id_str).await {
         Ok(job_state) => {
             let response = match job_state {
@@ -812,7 +1013,6 @@ async fn get_job_status(state: Data<AppState>, path: Path<String>) -> impl Respo
                     tx_hash: None,
                     reason: None,
                 },
-                // Phase 1 done — attestation_hash available, Groth16 in progress
                 JobState::Compressed { attestation_hash } => JobStatusResponse {
                     job_id: job_id_str,
                     status: "proving".into(),
@@ -821,23 +1021,6 @@ async fn get_job_status(state: Data<AppState>, path: Path<String>) -> impl Respo
                     tx_hash: None,
                     reason: None,
                 },
-                // Phase 2 done — Groth16 ready, settlement pending
-                JobState::Done { proof_path } => {
-                    let attestation_hash = state
-                        .manager
-                        .proof_data(&job_id_str)
-                        .await
-                        .ok()
-                        .map(|pd| format!("0x{}", hex::encode(pd.attestation_hash)));
-                    JobStatusResponse {
-                        job_id: job_id_str,
-                        status: "done".into(),
-                        proof_path: Some(proof_path),
-                        attestation_hash,
-                        tx_hash: None,
-                        reason: None,
-                    }
-                }
                 JobState::Failed { reason } => JobStatusResponse {
                     job_id: job_id_str,
                     status: "failed".into(),
@@ -854,7 +1037,6 @@ async fn get_job_status(state: Data<AppState>, path: Path<String>) -> impl Respo
 }
 
 /// GET /v1/jobs/{id}/proof
-/// Only available after phase 2 (Groth16) completes — status = "done".
 #[get("/v1/jobs/{id}/proof")]
 async fn get_proof(state: Data<AppState>, path: Path<String>) -> impl Responder {
     let job_id_str = path.into_inner();
@@ -867,34 +1049,222 @@ async fn get_proof(state: Data<AppState>, path: Path<String>) -> impl Responder 
     };
 
     match job_state {
-        JobState::Done { .. } => {}
-        JobState::Compressed { .. } => {
-            return HttpResponse::Accepted().json(err(
-                "groth16 proof not yet ready — job is proving (phase 2 in progress)",
-            ));
-        }
+        JobState::Compressed { attestation_hash } => HttpResponse::Ok().json(serde_json::json!({
+            "job_id":           job_id_str,
+            "status":           "compressed",
+            "attestation_hash": format!("0x{}", hex::encode(attestation_hash)),
+            "note": "proof is queued in the aggregator batch — \
+                     Groth16 settlement happens per batch, not per job"
+        })),
         JobState::Failed { reason } => {
-            return HttpResponse::UnprocessableEntity().json(err(format!("job failed: {reason}")));
+            HttpResponse::UnprocessableEntity().json(err(format!("job failed: {reason}")))
         }
-        _ => {
-            return HttpResponse::Accepted()
-                .json(err("job not complete yet — poll /v1/jobs/{id} first"));
+        _ => HttpResponse::Accepted().json(err("job not complete yet — poll /v1/jobs/{id} first")),
+    }
+}
+
+/// GET /v1/proofs?page=1&limit=20
+/// Returns a paginated list of all completed proof jobs, most recent first.
+#[get("/v1/proofs")]
+async fn list_proofs(
+    state: Data<AppState>,
+    query: actix_web::web::Query<ProofListQuery>,
+) -> impl Responder {
+    let limit = query.limit.clamp(1, 100);
+    let offset = (query.page.saturating_sub(1)) * limit;
+
+    match repo::list_jobs(&state.pool, limit, offset).await {
+        Ok(jobs) => {
+            let items: Vec<ProofListItem> = jobs
+                .into_iter()
+                .map(|j| ProofListItem {
+                    job_id: j.id.to_string(),
+                    status: j.status,
+                    model_id: j.model_id.to_string(),
+                    attestation_hash: j.attestation_hash,
+                    tx_hash: j.tx_hash,
+                    input_hash: j.input_hash,
+                    completed_at: j.completed_at.map(|t| t.to_rfc3339()),
+                    settled_at: j.settled_at.map(|t| t.to_rfc3339()),
+                })
+                .collect();
+
+            HttpResponse::Ok().json(serde_json::json!({
+                "page":   query.page,
+                "limit":  limit,
+                "proofs": items,
+            }))
+        }
+        Err(e) => {
+            error!("list_jobs failed: {e}");
+            HttpResponse::InternalServerError().json(err("failed to fetch proofs"))
+        }
+    }
+}
+
+/// GET /v1/proofs/:attestation_hash
+/// Fetch a single proof by its attestation hash.
+/// Also accepts a job UUID as the path param for convenience.
+#[get("/v1/proofs/{hash_or_id}")]
+async fn get_proof_by_hash(state: Data<AppState>, path: Path<String>) -> impl Responder {
+    let param = path.into_inner();
+
+    // Try UUID first — cheaper DB lookup
+    if let Ok(uuid) = Uuid::parse_str(&param) {
+        if let Ok(job) = repo::find_job(&state.pool, uuid).await {
+            return HttpResponse::Ok().json(ProofListItem {
+                job_id: job.id.to_string(),
+                status: job.status,
+                model_id: job.model_id.to_string(),
+                attestation_hash: job.attestation_hash,
+                tx_hash: job.tx_hash,
+                input_hash: job.input_hash,
+                completed_at: job.completed_at.map(|t| t.to_rfc3339()),
+                settled_at: job.settled_at.map(|t| t.to_rfc3339()),
+            });
         }
     }
 
-    match state.manager.read_proof(&job_id_str).await {
-        Ok(bytes) => {
-            let size_bytes = bytes.len();
-            let proof_hex = hex::encode(&bytes);
-            HttpResponse::Ok().json(ProofResponse {
-                job_id: job_id_str,
-                proof_hex,
-                size_bytes,
-            })
+    // Fall back to attestation_hash lookup
+    match repo::find_job_by_attestation_hash(&state.pool, &param).await {
+        Ok(job) => HttpResponse::Ok().json(ProofListItem {
+            job_id: job.id.to_string(),
+            status: job.status,
+            model_id: job.model_id.to_string(),
+            attestation_hash: job.attestation_hash,
+            tx_hash: job.tx_hash,
+            input_hash: job.input_hash,
+            completed_at: job.completed_at.map(|t| t.to_rfc3339()),
+            settled_at: job.settled_at.map(|t| t.to_rfc3339()),
+        }),
+        Err(common::error::CommonError::NotFound(_)) => {
+            HttpResponse::NotFound().json(err(format!("proof not found: {param}")))
         }
         Err(e) => {
-            error!("read_proof failed: {e}");
-            HttpResponse::InternalServerError().json(err(e.to_string()))
+            error!("find_job_by_attestation_hash failed: {e}");
+            HttpResponse::InternalServerError().json(err("database error"))
+        }
+    }
+}
+
+/// GET /v1/account/:wallet
+/// Returns vault balance, proof count, HSK spent for the given wallet.
+/// Reads from DB (job records) + on-chain vault balance via VaultClient.
+#[get("/v1/account/{wallet}")]
+async fn get_account(state: Data<AppState>, path: Path<String>) -> impl Responder {
+    let wallet = path.into_inner();
+
+    // On-chain balance via VaultClient — this is the authoritative source.
+    // FIX: vault.balance_of() now correctly accesses result._0 from the
+    // Alloy sol! macro return struct.
+    let vault_balance_wei = match &state.vault {
+        Some(vault) => match vault.balance_of(&wallet).await {
+            Ok(b) => b.to_string(),
+            Err(e) => {
+                warn!(wallet = %wallet, "vault balance_of failed: {e}");
+                "0".into()
+            }
+        },
+        None => "0".into(),
+    };
+
+    let balance_wei_u128: u128 = vault_balance_wei.parse().unwrap_or(0);
+    let balance_hsk: f64 = balance_wei_u128 as f64 / 1e18;
+    let proofs_remaining = (balance_hsk / 2.0).floor() as i64;
+
+    // Per-wallet proof count and HSK spent from vault_events table.
+    // FIX: use get_account_stats (queries vault_events) not count_settled_jobs.
+    let (proof_count, hsk_spent_str) = match repo::get_account_stats(&state.pool, &wallet).await {
+        Ok(s) => (s.proof_count, format!("{:.4}", s.proof_count as f64 * 2.0)),
+        Err(e) => {
+            warn!(wallet = %wallet, "get_account_stats failed: {e}");
+            (0i64, "0.0000".into())
+        }
+    };
+
+    HttpResponse::Ok().json(AccountResponse {
+        wallet,
+        vault_balance_wei,
+        vault_balance_hsk: format!("{:.4}", balance_hsk),
+        proof_count,
+        hsk_spent: hsk_spent_str,
+        proofs_remaining,
+    })
+}
+
+// ── GET /v1/account/{wallet}/history ─────────────────────────────────────────
+#[get("/v1/account/{wallet}/history")]
+async fn get_account_history(
+    state: Data<AppState>,
+    path: Path<String>,
+    query: Query<HistoryQuery>,
+) -> impl Responder {
+    let wallet = path.into_inner();
+    let limit = query.limit.clamp(1, 100);
+    let offset = (query.page.saturating_sub(1)) * limit;
+    let operation = query.operation.as_deref();
+
+    match repo::get_account_history(&state.pool, &wallet, limit, offset, operation).await {
+        Ok(events) => {
+            let entries: Vec<serde_json::Value> = events
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "tx_hash":    e.tx_hash,
+                        "operation":  e.operation,
+                        "amount_wei": e.amount_wei,
+                        "timestamp":  e.created_at.to_rfc3339(),
+                        "job_id":     e.job_id.map(|id| id.to_string()),
+                    })
+                })
+                .collect();
+            HttpResponse::Ok().json(serde_json::json!({
+                "page":    query.page,
+                "limit":   limit,
+                "entries": entries,
+            }))
+        }
+        Err(e) => {
+            error!("get_account_history failed: {e}");
+            HttpResponse::InternalServerError().json(err("database error"))
+        }
+    }
+}
+
+#[post("/v1/account/{wallet}/events")]
+async fn record_vault_event(
+    state: Data<AppState>,
+    path: Path<String>,
+    Json(req): Json<RecordVaultEventRequest>,
+) -> impl Responder {
+    let wallet = path.into_inner();
+
+    if req.tx_hash.trim().is_empty() || req.amount_wei.trim().is_empty() {
+        return HttpResponse::BadRequest().json(err("tx_hash and amount_wei are required"));
+    }
+
+    if req.operation != "deposit" && req.operation != "deduct" {
+        return HttpResponse::BadRequest().json(err("operation must be 'deposit' or 'deduct'"));
+    }
+
+    match repo::insert_vault_event(
+        &state.pool,
+        &wallet,
+        &req.tx_hash,
+        &req.operation,
+        &req.amount_wei,
+        None,
+    )
+    .await
+    {
+        Ok(()) => HttpResponse::Created().json(serde_json::json!({
+            "ok": true,
+            "wallet": wallet,
+            "tx_hash": req.tx_hash,
+        })),
+        Err(e) => {
+            error!(wallet = %wallet, "record_vault_event failed: {e}");
+            HttpResponse::InternalServerError().json(err("database error"))
         }
     }
 }
@@ -922,9 +1292,9 @@ async fn main() -> std::io::Result<()> {
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(8080);
 
-    let client_url = std::env::var("CLIENT_URL").unwrap_or_else(|_| "http://localhost:5173".into());
+    // FIX 1: default to localhost:3000 (frontend dev server port)
+    let client_url = std::env::var("CLIENT_URL").unwrap_or_else(|_| "http://localhost:3000".into());
 
-    // ── Database ──────────────────────────────────────────────────────────────
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let pool = common::db::build_pool(&database_url).expect("failed to build DB pool");
     common::db::run_migrations(&pool)
@@ -934,13 +1304,8 @@ async fn main() -> std::io::Result<()> {
     info!("database connected and migrations applied");
     let pool = Arc::new(pool);
 
-    // ── Prover manager — pre-warms proving key at startup ─────────────────────
-    // ProverManager::new() calls proving::setup() which reads the ELF from disk
-    // and runs client.setup() once. All subsequent jobs reuse the cached key.
-    // Panics if ELF or weights are missing — fail fast at startup.
     let manager = ProverManager::new(prover_config());
 
-    // ── Settler — HashKey testnet ─────────────────────────────────────────────
     let (settler, settle_enabled) = match SettlerConfig::from_env() {
         Ok(cfg) => {
             info!(
@@ -951,7 +1316,10 @@ async fn main() -> std::io::Result<()> {
             (Arc::new(Settler::new(cfg)), true)
         }
         Err(e) => {
-            warn!("settlement disabled ({e}) — set SETTLER_RPC_URL, SETTLER_PRIVATE_KEY, INFERENCE_VERIFIER_ADDRESS");
+            warn!(
+                "settlement disabled ({e}) — set SETTLER_RPC_URL, \
+                 SETTLER_PRIVATE_KEY, INFERENCE_VERIFIER_ADDRESS"
+            );
             let dummy_cfg = SettlerConfig {
                 rpc_url: "http://localhost:8545".into(),
                 private_key: "0x0000000000000000000000000000000000000000000000000000000000000001"
@@ -959,19 +1327,17 @@ async fn main() -> std::io::Result<()> {
                 contract_address: "0x0000000000000000000000000000000000000000".into(),
                 confirmations: 1,
                 tx_timeout_secs: 120,
-                // Kept for struct compat — unused in HashKey path
                 eth_sepolia_inference_bridge: String::new(),
-                starknet_rpc: String::new(),
-                starknet_inference_verifier: String::new(),
-                starknet_poll_interval_secs: 15,
-                starknet_max_poll_attempts: 24,
-                starknet_bridge_fee_wei: 0,
+                rpc: String::new(),
+                inference_verifier: String::new(),
+                poll_interval_secs: 15,
+                max_poll_attempts: 24,
+                bridge_fee_wei: 0,
             };
             (Arc::new(Settler::new(dummy_cfg)), false)
         }
     };
 
-    // ── IPFS client ───────────────────────────────────────────────────────────
     let ipfs_client = match PinataClient::from_env() {
         Ok(c) => {
             info!("IPFS client configured via Pinata");
@@ -979,6 +1345,29 @@ async fn main() -> std::io::Result<()> {
         }
         Err(e) => {
             warn!("IPFS not configured ({e}) — POST /v1/models will return 503");
+            None
+        }
+    };
+
+    let batch_cfg = BatchConfig::from_env();
+    let batch_collector = BatchCollector::new(&batch_cfg)
+        .await
+        .expect("failed to initialise batch collector — check AGG_ELF_PATH");
+
+    // Initialize the VaultClient if address is present
+    let vault: Option<Arc<settler::vault::VaultClient>> = match std::env::var("VAULT_ADDRESS") {
+        Ok(addr) => match SettlerConfig::from_env() {
+            Ok(cfg) => {
+                info!(vault_address = %addr, "VeilVault fee collection enabled");
+                Some(Arc::new(settler::vault::VaultClient::new(cfg, addr)))
+            }
+            Err(e) => {
+                warn!("VEIL_VAULT_ADDRESS set but settler config missing ({e}) — fees disabled");
+                None
+            }
+        },
+        Err(_) => {
+            info!("VEIL_VAULT_ADDRESS not set — proofs are free");
             None
         }
     };
@@ -991,13 +1380,59 @@ async fn main() -> std::io::Result<()> {
         pool,
         settle_enabled,
         ipfs_client,
+        batch_collector: Arc::clone(&batch_collector),
+        vault,
     });
 
+    // Flush timer
+    {
+        let collector = Arc::clone(&batch_collector);
+        let settler = Arc::clone(&state.settler);
+        let pool = Arc::clone(&state.pool);
+
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(collector.flush_secs));
+            interval.tick().await; // skip first tick
+
+            loop {
+                interval.tick().await;
+
+                let pending = collector.pending_count().await;
+                if pending == 0 {
+                    continue;
+                }
+
+                info!(pending, "flush timer fired — draining batch collector");
+                let batch = collector.flush().await;
+                if batch.is_empty() {
+                    continue;
+                }
+
+                let elf = collector.agg_elf.clone();
+                let settler = Arc::clone(&settler);
+                let pool = Arc::clone(&pool);
+                tokio::spawn(async move {
+                    settle_batch(batch, &elf, &settler, &pool).await;
+                });
+            }
+        });
+    }
+
     HttpServer::new(move || {
+        // FIX 2: allow both localhost:3000 and localhost:5173 so dev works
+        // regardless of which port the frontend is on
         let cors = Cors::default()
             .allowed_origin(&client_url)
+            .allowed_origin("http://localhost:5173")
+            .allowed_origin("http://localhost:3000")
             .allowed_methods(vec!["GET", "POST", "OPTIONS"])
-            .allowed_headers(vec![header::CONTENT_TYPE, header::AUTHORIZATION])
+            .allowed_headers(vec![
+                header::CONTENT_TYPE,
+                header::AUTHORIZATION,
+                header::ACCEPT,
+            ])
+            .supports_credentials()
             .max_age(3600);
 
         App::new()
@@ -1009,6 +1444,11 @@ async fn main() -> std::io::Result<()> {
             .service(submit_job)
             .service(get_job_status)
             .service(get_proof)
+            .service(list_proofs)
+            .service(get_proof_by_hash)
+            .service(get_account)
+            .service(get_account_history)
+            .service(record_vault_event)
     })
     .bind((host.as_str(), port))?
     .run()

@@ -1,12 +1,12 @@
 [workspace]
 members = [
     "crates/aggregator",
+    "crates/aggregator-guest",
     "crates/common",
     "crates/gateway",
     "crates/guest",
     "crates/ipfs",
     "crates/models/tiny_mlp",
-    "crates/prover",
     "crates/prover-manager",
     "crates/settler",
     "sdk/Rust",

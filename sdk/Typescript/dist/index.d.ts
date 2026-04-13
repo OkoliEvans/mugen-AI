@@ -1,4 +1,4 @@
-type JobStatus = 'queued' | 'running' | 'done' | 'settled' | 'failed';
+type JobStatus = "queued" | "running" | "done" | "settled" | "failed";
 interface Job {
     /** Unique job identifier (UUID) */
     jobId: string;
@@ -8,6 +8,7 @@ interface Job {
     proofPath?: string;
     /** On-chain transaction hash (populated after settlement) */
     txHash?: string;
+    attestationHash?: string;
     /** Failure reason (populated when failed) */
     reason?: string;
 }
@@ -21,15 +22,17 @@ interface Attestation {
     /** keccak256 of the output data — the on-chain attestation key */
     outputHash: string;
     /** Status of the on-chain proof */
-    status: 'settled' | 'pending' | 'failed';
+    status: "settled" | "pending" | "failed";
 }
 interface VerifyResult {
     /** Unique job identifier */
     jobId: string;
+    /** Status of the verification */
+    status: "pending" | "verified" | "failed";
     /** keccak256 of the output data used as the attestation key on-chain */
     attestationHash: string;
     /** On-chain transaction hash of the settled proof */
-    txHash: string;
+    txHash?: string;
     /** Time taken from submission to settlement (milliseconds) */
     elapsedMs: number;
 }
@@ -40,7 +43,7 @@ interface ProofData {
     /** Proof size in bytes */
     sizeBytes: number;
 }
-interface ElenxisConfig {
+interface VeilConfig {
     /** Gateway base URL — e.g. http://localhost:8080 */
     gatewayUrl: string;
     /**
@@ -59,56 +62,50 @@ interface ElenxisConfig {
      */
     maxRetries?: number;
 }
-type ElenxisErrorCode = 'SUBMIT_FAILED' | 'POLL_FAILED' | 'JOB_FAILED' | 'TIMEOUT' | 'PROOF_FETCH_FAILED' | 'NETWORK_ERROR';
+type VeilErrorCode = "SUBMIT_FAILED" | "POLL_FAILED" | "JOB_FAILED" | "TIMEOUT" | "PROOF_FETCH_FAILED" | "NETWORK_ERROR";
 
 /**
- * ElenxisClient — the primary entry point for the Elenxis SDK.
+ * VeilClient — the primary entry point for the Veil SDK.
  *
  * @example
  * ```typescript
- * import { ElenxisClient } from '@elenxis/sdk';
+ * import { VeilClient } from '@mugen-ai/sdk';
  *
- * // EVM settlement (default)
- * const client = new ElenxisClient({
+ * const client = new VeilClient({
  *   gatewayUrl: 'http://localhost:8080',
- * });
- *
- * // StarkNet settlement — increase timeout to account for L1→L2 relay
- * const client = new ElenxisClient({
- *   gatewayUrl: 'http://localhost:8080',
- *   timeoutMs:  300_000,
  * });
  *
  * const result = await client.verifyInference({
- *   modelId:   'tiny_mlp_v1',
- *   inputData: [[0.1, 0.2, 0.3, 0.4]],
+ *   modelId:   'polymarket_mlp_v1',
+ *   inputData: [[0.6, 0.4, 12000, 0.2]],
  * });
  *
- * console.log(result.txHash);          // on-chain tx hash
- * console.log(result.attestationHash); // keccak256 output hash stored on-chain
+ * console.log(result.attestationHash); // keccak256 proof fingerprint
+ * console.log(result.txHash);          // HashKey testnet tx — available after batch settlement
  * ```
  */
-declare class ElenxisClient {
+declare class VeilClient {
     private readonly http;
     private readonly timeoutMs;
     private readonly pollIntervalMs;
-    constructor(config: ElenxisConfig);
+    constructor(config: VeilConfig);
     /**
-     * Submit an inference for ZK verification and wait for on-chain settlement.
+     * Submit an inference for ZK verification and wait for the compressed proof.
      *
      * This is the primary SDK method. It:
      *   1. Submits the inference job to the gateway
-     *   2. Polls until the job reaches 'done' or 'settled' status
-     *   3. Fetches tx_hash from Postgres (retries until available)
-     *   4. Returns the attestation hash and transaction reference
+     *   2. Polls until the job reaches 'done' status (compressed proof ready)
+     *   3. Returns attestationHash immediately — available as soon as proving completes
      *
-     * For StarkNet settlement, set timeoutMs to at least 300_000 (5 min)
-     * to account for the L1→L2 relay latency.
+     * Note: txHash is populated asynchronously after batch settlement. The aggregator
+     * collects N compressed proofs then runs one Groth16 for on-chain settlement.
+     * txHash will be undefined until that batch settles. Poll getJob(jobId) to
+     * check for it, or query isVerified() on the contract directly.
      *
      * @param params.modelId   - Model identifier (must match a registered model)
      * @param params.inputData - 2D array of input values matching the model's input shape
-     * @returns VerifyResult containing jobId, attestationHash, txHash, and elapsedMs
-     * @throws ElenxisError on submission failure, job failure, or timeout
+     * @returns VerifyResult containing jobId, attestationHash, optional txHash, and elapsedMs
+     * @throws VeilError on submission failure, job failure, or timeout
      */
     verifyInference(params: {
         modelId: string;
@@ -134,7 +131,10 @@ declare class ElenxisClient {
      */
     waitForJob(jobId: string): Promise<Job>;
     /**
-     * Fetch the raw proof bytes for a completed job.
+     * Fetch proof metadata for a completed job.
+     *
+     * Note: per-job Groth16 proof bytes no longer exist. This endpoint returns
+     * the attestation_hash and batch queue status for the job.
      */
     getProof(jobId: string): Promise<ProofData>;
     /**
@@ -143,30 +143,30 @@ declare class ElenxisClient {
      */
     healthCheck(): Promise<boolean>;
     /**
-     * Derives the attestation hash for a completed job from its proof bytes.
-     * Returns the first 32 bytes of the proof hex as a fingerprint.
-     * Full on-chain verification should use isVerified() on the contract directly.
+     * Fetch attestation_hash for a completed job directly from the job status.
+     * The gateway writes attestation_hash to Postgres when status = "proving"
+     * and it is preserved on the "done" row — no proof bytes needed.
      */
     private fetchAttestationHash;
 }
 
 /**
- * All errors thrown by the Elenxis SDK are instances of ElenxisError.
+ * All errors thrown by the Veil SDK are instances of VeilError.
  * Check the `code` field to handle specific failure modes.
  *
  * @example
  * try {
  *   await client.verifyInference(...)
  * } catch (err) {
- *   if (err instanceof ElenxisError && err.code === 'TIMEOUT') {
+ *   if (err instanceof VeilError && err.code === 'TIMEOUT') {
  *     // handle timeout
  *   }
  * }
  */
-declare class ElenxisError extends Error {
-    readonly code: ElenxisErrorCode;
+declare class VeilError extends Error {
+    readonly code: VeilErrorCode;
     readonly cause?: unknown;
-    constructor(code: ElenxisErrorCode, message: string, cause?: unknown);
+    constructor(code: VeilErrorCode, message: string, cause?: unknown);
 }
 
-export { type Attestation, ElenxisClient, type ElenxisConfig, ElenxisError, type ElenxisErrorCode, type Job, type JobStatus, type ProofData, type VerifyResult };
+export { type Attestation, type Job, type JobStatus, type ProofData, VeilClient, type VeilConfig, VeilError, type VeilErrorCode, type VerifyResult };

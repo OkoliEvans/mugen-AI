@@ -231,19 +231,20 @@ name = "aggregator"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
- "common",
- "dotenvy",
+ "bincode",
  "hex",
- "redis",
- "serde",
- "serde_json",
- "settler",
- "thiserror 1.0.69",
+ "sha2 0.10.9",
+ "sp1-sdk",
  "tokio",
  "tracing",
- "tracing-subscriber",
- "uuid",
+]
+
+[[package]]
+name = "aggregator-guest"
+version = "0.1.0"
+dependencies = [
+ "sha2 0.10.9",
+ "sp1-zkvm",
 ]
 
 [[package]]
@@ -1160,15 +1161,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
-name = "arc-swap"
-version = "1.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a07d1f37ff60921c83bdfc7407723bdefe89b44b98a9b772f225c8f9d67141a6"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "ark-ff"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1915,15 +1907,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "backon"
-version = "1.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
-dependencies = [
- "fastrand",
-]
-
-[[package]]
 name = "backtrace"
 version = "0.3.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2418,11 +2401,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
 dependencies = [
  "bytes",
- "futures-core",
  "memchr",
- "pin-project-lite",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -3642,9 +3621,11 @@ version = "0.1.0"
 dependencies = [
  "actix-cors",
  "actix-web",
+ "aggregator",
  "alloy",
  "anyhow",
  "base64 0.22.1",
+ "bincode",
  "bytes",
  "chrono",
  "common",
@@ -3658,6 +3639,7 @@ dependencies = [
  "serde_json",
  "settler",
  "sha2 0.10.9",
+ "sp1-sdk",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -5807,10 +5789,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "prover"
-version = "0.1.0"
-
-[[package]]
 name = "prover-manager"
 version = "0.1.0"
 dependencies = [
@@ -6077,32 +6055,6 @@ name = "recvmsg"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
-
-[[package]]
-name = "redis"
-version = "0.27.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09d8f99a4090c89cc489a94833c901ead69bfbf3877b4867d5482e321ee875bc"
-dependencies = [
- "arc-swap",
- "async-trait",
- "backon",
- "bytes",
- "combine",
- "futures",
- "futures-util",
- "itertools 0.13.0",
- "itoa",
- "num-bigint 0.4.6",
- "percent-encoding",
- "pin-project-lite",
- "ryu",
- "sha1_smol",
- "socket2 0.5.10",
- "tokio",
- "tokio-util",
- "url",
-]
 
 [[package]]
 name = "redox_syscall"
@@ -8111,6 +8063,7 @@ dependencies = [
  "libm",
  "rand 0.8.5",
  "sha2 0.10.9",
+ "slop-algebra",
  "sp1-lib",
  "sp1-primitives",
 ]

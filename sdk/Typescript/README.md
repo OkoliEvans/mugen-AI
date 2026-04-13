@@ -1,8 +1,8 @@
-# @mugen/sdk
+# @mugen-ai/sdk
 
-TypeScript SDK for the [Mugen Verifiable Inference Network](https://mugen.xyz).
+TypeScript SDK for the Mugen Verifiable Inference Network.
 
-Submit AI inference jobs, receive ZK proofs, and verify them on StarkNet — in a single function call.
+Submit AI inference jobs, receive ZK proofs, and verify them on HashKey Chain — in a single function call.
 
 ---
 
@@ -16,81 +16,80 @@ Submit AI inference jobs, receive ZK proofs, and verify them on StarkNet — in 
 ## Installation
 
 ```bash
-# from the mugen/ workspace root
-cd sdk
-npm install
-npm run build
+npm install @mugen-ai/sdk
 ```
 
-To use the SDK in another package within the monorepo, add it as a local dependency:
+To use within the monorepo as a local dependency:
 
 ```json
 {
   "dependencies": {
-    "@mugen/sdk": "file:../sdk"
+    "@mugen-ai/sdk": "file:../sdk/Typescript"
   }
 }
 ```
 
 ---
 
-## Quick start
+## Quick Start
 
 ```typescript
-import { ElenxisClient } from '@mugen/sdk';
+import { VeilClient } from '@mugen-ai/sdk'
 
-const client = new ElenxisClient({
-  gatewayUrl: 'http://localhost:8080',
-  timeoutMs:  300_000, // 5 min — accounts for L1→L2 StarkNet relay time
-});
+const client = new VeilClient({
+  gatewayUrl: 'https://your-gateway.xyz',
+  timeoutMs:  600_000,
+})
 
-const result = await client.verifyInference({
-  modelId:   'tiny_mlp_v1',
-  inputData: [[0.1, 0.2, 0.3, 0.4]],
-});
+const job = await client.verifyInference({
+  modelId:   'polymarket_mlp_v1',
+  inputData: [[0.6, 0.4, 12000, 0.2]],
+})
 
-console.log('Job ID:           ', result.jobId);
-console.log('Attestation hash: ', result.attestationHash);
-console.log('On-chain tx:      ', result.txHash);
-console.log('Time taken:       ', result.elapsedMs, 'ms');
+console.log('Job ID:           ', job.jobId)
+console.log('Attestation hash: ', job.attestationHash) // keccak256(model_id||input_hash||output_hash)
+console.log('On-chain tx:      ', job.txHash)          // HashKey testnet settlement tx
+console.log('Time taken:       ', job.elapsedMs, 'ms')
 ```
 
 ---
 
 ## API
 
-### `new ElenxisClient(config)`
+### `new VeilClient(config)`
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `gatewayUrl` | `string` | required | Gateway base URL |
-| `timeoutMs` | `number` | `300000` | Max wait for job completion (ms). Use ≥300000 — StarkNet L1→L2 relay takes 1–3 min |
+| `gatewayUrl` | `string` | required | Mugen gateway base URL |
+| `timeoutMs` | `number` | `600000` | Max wait for job completion (ms). Use ≥600000 — SP1 proving + batch aggregation takes 2–5 min |
 | `pollIntervalMs` | `number` | `1000` | Status polling interval (ms) |
 | `maxRetries` | `number` | `3` | HTTP retry attempts on failure |
 
 ---
 
-### `client.verifyInference(params)`
+### `client.verifyInference(params)` → `VerifyResult`
 
-The primary method. Submits an inference, waits for ZK proof generation, waits for on-chain settlement on StarkNet, and returns the result.
+The primary method. Submits an inference job, waits for SP1 ZK proof generation (phase 1 compressed ~60s), waits for batch aggregation and on-chain settlement on HashKey testnet, and returns the result.
 
 ```typescript
-const result = await client.verifyInference({
-  modelId:   'tiny_mlp_v1',            // registered model identifier
-  inputData: [[0.1, 0.2, 0.3, 0.4]],  // 2D input array matching model input shape
-});
+const job = await client.verifyInference({
+  modelId:   'polymarket_mlp_v1',       // registered model identifier
+  inputData: [[0.6, 0.4, 12000, 0.2]], // 2D input array matching model input shape
+})
 ```
 
 **Returns: `VerifyResult`**
 
 ```typescript
 {
-  jobId:           string;  // UUID of the proof job
-  attestationHash: string;  // keccak256-derived proof fingerprint (0x + 64 hex chars)
-  txHash:          string;  // Eth Sepolia tx hash from InferenceBridge.verifyAndBridge()
-  elapsedMs:       number;  // total wall time from submit to StarkNet confirmation
+  jobId:           string  // UUID of the proof job
+  attestationHash: string  // keccak256(model_id||input_hash||output_hash) — 0x + 64 hex chars
+  txHash:          string  // HashKey testnet settlement tx hash
+  elapsedMs:       number  // total wall time from submit to on-chain confirmation
 }
 ```
+
+The `attestationHash` is the cryptographic fingerprint of the inference — it binds a specific model, specific input, and specific output together permanently. It is queryable on HashKey testnet via `InferenceVerifier.isVerified(outputHash)`.
 
 ---
 
@@ -102,7 +101,7 @@ Submit a job without waiting. Returns the `jobId`.
 const jobId = await client.submitJob({
   modelId:   'tiny_mlp_v1',
   inputData: [[0.1, 0.2, 0.3, 0.4]],
-});
+})
 ```
 
 ---
@@ -112,65 +111,93 @@ const jobId = await client.submitJob({
 Get current job status.
 
 ```typescript
-const job = await client.getJob(jobId);
-// job.status: 'queued' | 'running' | 'done' | 'settled' | 'failed'
+const job = await client.getJob(jobId)
+// job.status: 'queued' | 'running' | 'proving' | 'done' | 'settled' | 'failed'
+// job.attestationHash — available once status is 'proving' (phase 1 complete, ~60s)
+// job.txHash          — available once status is 'settled'
 ```
 
 ---
 
 ### `client.waitForJob(jobId)` → `Job`
 
-Block until a job reaches a terminal state.
+Block until a job reaches a terminal state (`settled` or `failed`).
 
 ```typescript
-const job = await client.waitForJob(jobId);
+const job = await client.waitForJob(jobId)
+if (job.status === 'settled') {
+  console.log('tx_hash:', job.txHash)
+}
 ```
 
 ---
 
 ### `client.getProof(jobId)` → `ProofData`
 
-Fetch the raw ZK proof for a completed job.
+Fetch attestation info for a completed job. Proofs are batched — individual Groth16 bytes are not exposed per-job. Use the `txHash` to look up the batch on HashKey testnet.
 
 ```typescript
-const proof = await client.getProof(jobId);
-// proof.proofHex  — hex-encoded Halo2 KZG proof bytes
-// proof.sizeBytes — proof size in bytes
+const proof = await client.getProof(jobId)
+// proof.attestationHash — keccak256 fingerprint
+// proof.status          — 'compressed' | 'settled'
 ```
 
 ---
 
 ### `client.healthCheck()` → `boolean`
 
-Returns `true` if the gateway is reachable.
+Returns `true` if the gateway is reachable and healthy.
 
 ```typescript
-const healthy = await client.healthCheck();
+const healthy = await client.healthCheck()
 ```
 
 ---
 
-## Error handling
+## Job Status Lifecycle
 
-All errors thrown by the SDK are instances of `ElenxisError`.
+```
+queued → running → proving → done → settled
+                                  ↘ failed
+```
+
+| Status | Meaning |
+|---|---|
+| `queued` | Job accepted, waiting for SP1 prover slot |
+| `running` | SP1 prover is executing the inference inside the zkVM |
+| `proving` | Phase 1 complete — compressed STARK proof ready, `attestationHash` available |
+| `done` | Proof queued in batch collector, awaiting aggregation |
+| `settled` | Aggregated Groth16 proof verified on HashKey testnet, `txHash` available |
+| `failed` | Proving or settlement failed |
+
+The `attestationHash` is returned as soon as status reaches `proving` (~60s). You do not need to wait for full settlement to use the attestation.
+
+---
+
+## Error Handling
+
+All SDK errors are instances of `VeilError`.
 
 ```typescript
-import { ElenxisClient, ElenxisError } from '@mugen/sdk';
+import { VeilClient, VeilError } from '@mugen-ai/sdk'
 
 try {
-  await client.verifyInference({ modelId: 'tiny_mlp_v1', inputData: [[0.1]] });
+  await client.verifyInference({
+    modelId:   'tiny_mlp_v1',
+    inputData: [[0.1, 0.2, 0.3, 0.4]],
+  })
 } catch (err) {
-  if (err instanceof ElenxisError) {
+  if (err instanceof VeilError) {
     switch (err.code) {
       case 'TIMEOUT':
-        console.error('Job timed out — increase timeoutMs to ≥300000 for StarkNet');
-        break;
+        console.error('Job timed out — increase timeoutMs (SP1 proving takes 2–5 min)')
+        break
       case 'JOB_FAILED':
-        console.error('Proof generation or settlement failed:', err.message);
-        break;
+        console.error('Proof generation or settlement failed:', err.message)
+        break
       case 'SUBMIT_FAILED':
-        console.error('Could not reach gateway:', err.message);
-        break;
+        console.error('Could not reach gateway:', err.message)
+        break
     }
   }
 }
@@ -184,56 +211,80 @@ try {
 | `POLL_FAILED` | Status polling request failed |
 | `JOB_FAILED` | Proof generation or on-chain settlement failed |
 | `TIMEOUT` | Job did not complete within `timeoutMs` |
-| `PROOF_FETCH_FAILED` | Could not retrieve proof bytes |
+| `PROOF_FETCH_FAILED` | Could not retrieve proof data |
 | `NETWORK_ERROR` | Unclassified network error |
 
 ---
 
-## Advanced usage
+## Advanced Usage
 
-### Manual submit + poll
+### Submit and poll manually
 
 ```typescript
 // Submit without blocking
 const jobId = await client.submitJob({
-  modelId:   'tiny_mlp_v1',
-  inputData: [[0.1, 0.2, 0.3, 0.4]],
-});
+  modelId:   'polymarket_mlp_v1',
+  inputData: [[0.6, 0.4, 12000, 0.2]],
+})
 
-console.log('Job submitted:', jobId);
+console.log('Job submitted:', jobId)
 
-// Do other work...
+// Attestation hash available after ~60s (phase 1)
+let job = await client.getJob(jobId)
+while (job.status === 'queued' || job.status === 'running') {
+  await new Promise(r => setTimeout(r, 2000))
+  job = await client.getJob(jobId)
+}
 
-// Then wait for completion
-const job = await client.waitForJob(jobId);
-console.log('Settled, tx:', job.txHash);
+if (job.attestationHash) {
+  console.log('Proof attested:', job.attestationHash)
+  // You can act on the attestation now — settlement continues in background
+}
+
+// Wait for full on-chain settlement
+const settled = await client.waitForJob(jobId)
+console.log('Settled, tx:', settled.txHash)
+```
+
+### Check on-chain via cast
+
+After settlement, verify directly on HashKey testnet:
+
+```bash
+# Check if output hash is verified on-chain
+cast call 0x69f77055e9A6e6B34539Db2BD733f9eB07F9f11f \
+  "isVerified(bytes32)(bool)" \
+  <output_hash> \
+  --rpc-url https://testnet.hsk.xyz
 ```
 
 ### Run the e2e test
 
 ```bash
-cd sdk
-GATEWAY_URL=http://localhost:8080 TIMEOUT_MS=300000 npx tsx e2e_verify.ts
+cd sdk/Typescript
+GATEWAY_URL=http://localhost:8080 TIMEOUT_MS=600000 npx tsx e2e_verify.ts
 ```
 
 ---
 
-## Gateway setup
+## Gateway Setup
 
 The SDK communicates with the Mugen gateway. To run locally:
 
 ```bash
 # from mugen/ root
-cargo run -p gateway
+SP1_PROVER=network cargo run -p gateway
 ```
 
-The gateway defaults to `http://0.0.0.0:8080`.
+The gateway defaults to `http://0.0.0.0:8080`. Set `CLIENT_URL=http://localhost:3000` if the frontend is also running locally.
 
 ---
 
 ## Development
 
 ```bash
+cd sdk/Typescript
+
 # Install dependencies
 npm install
 
@@ -249,20 +300,28 @@ npm run dev
 
 ---
 
-## Project structure
+## Project Structure
 
 ```
-sdk/
+sdk/Typescript/
 ├── src/
 │   ├── index.ts       — public exports
-│   ├── client.ts      — ElenxisClient (main class)
-│   ├── types.ts       — all TypeScript types
-│   ├── errors.ts      — ElenxisError class
+│   ├── client.ts      — VeilClient (main class)
+│   ├── types.ts       — TypeScript types
+│   ├── errors.ts      — VeilError class
 │   ├── http.ts        — Axios client with retry logic
-│   ├── poller.ts      — job status polling
-│   └── client.test.ts — full test suite
-├── e2e_verify.ts      — live end-to-end test
+│   ├── poller.ts      — job status polling loop
+│   └── client.test.ts — unit test suite
+├── e2e_verify.ts      — live end-to-end test against a running gateway
 ├── package.json
 ├── tsconfig.json
 └── jest.config.js
 ```
+
+---
+
+## See Also
+
+- [Mugen Gateway README](../README.md) — full architecture, contract addresses, deployment guide
+- [Rust SDK](../Rust/README.md) — `mugen-sdk` Rust crate
+- [Polymarket Veil Agent](../../polymarket-veil-agent/README.md) — example consumer built on this SDK

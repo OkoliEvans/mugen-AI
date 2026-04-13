@@ -5,6 +5,7 @@ edition = "2021"
 description = "Rust SDK for the Mugen Veil verifiable inference network"
 license = "MIT"
 repository = "https://github.com/OkoliEvans/mugen-AI"
+readme      = "README.md"
 keywords = ["zkml", "zk", "inference", "sp1", "mugen"]
 categories = ["api-bindings", "cryptography"]
 
