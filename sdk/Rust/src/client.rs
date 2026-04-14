@@ -176,10 +176,12 @@ impl VeilClient {
         &self,
         model_id: impl Into<String>,
         input_data: Vec<Vec<f64>>,
+        wallet_address: Option<String>,
     ) -> Result<String> {
         let body = SubmitJobRequest {
             input_data,
             model_id: model_id.into(),
+            wallet_address,
         };
 
         debug!(model_id = %body.model_id, "POST /v1/jobs");
@@ -275,12 +277,13 @@ impl VeilClient {
         &self,
         model_id: impl Into<String>,
         input_data: Vec<Vec<f64>>,
+        wallet_address: Option<String>,
     ) -> Result<VerifyResult> {
         let model_id = model_id.into();
         let started = Instant::now();
 
         // 1. Submit
-        let job_id = self.submit_job(&model_id, input_data).await?;
+        let job_id = self.submit_job(&model_id, input_data, wallet_address).await?;
         info!(%job_id, %model_id, "job submitted — polling until terminal state");
 
         // 2. Poll

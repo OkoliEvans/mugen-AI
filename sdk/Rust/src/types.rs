@@ -47,6 +47,8 @@ impl std::fmt::Display for JobStatus {
 pub(crate) struct SubmitJobRequest {
     pub input_data: Vec<Vec<f64>>,
     pub model_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wallet_address: Option<String>,
 }
 
 /// Response from POST /v1/jobs.

@@ -36,7 +36,11 @@ async fn main() -> veil_sdk::error::Result<()> {
         .build()?;
 
     let result = client
-        .verify_inference("polymarket_mlp_v1", vec![vec![0.6, 0.4, 12000.0, 0.2]])
+        .verify_inference(
+            "polymarket_mlp_v1",
+            vec![vec![0.6, 0.4, 12000.0, 0.2]],
+            Some("0xYourWallet".to_string()), // required if gateway has VAULT_ADDRESS set
+        )
         .await?;
 
     println!("status:           {}", result.status);
@@ -75,19 +79,22 @@ let client = VeilClient::builder()
 | `timeout` | `Duration` | `600s` | Max wall-clock time for `verify_inference` to reach a terminal state. SP1 proving + batch aggregation takes 2–5 min. |
 | `poll_interval` | `Duration` | `3s` | How often to poll `GET /v1/jobs/{id}` while waiting. |
 
-`VeilClient` is cheap to clone — the underlying `reqwest::Client` uses an `Arc` internally and shares the connection pool across clones.
+`VeilClient` is cheap to clone — the underlying `reqwest::Client` uses an `Arc` internally and
+shares the connection pool across clones.
 
 ---
 
 ### `verify_inference` → `VerifyResult`
 
-The primary high-level method. Submits an inference job and blocks until it reaches a terminal state (`settled` or `failed`), polling at the configured interval.
+The primary high-level method. Submits an inference job and blocks until it reaches a terminal
+state (`settled` or `failed`), polling at the configured interval.
 
 ```rust
 let result = client
     .verify_inference(
         "polymarket_mlp_v1",
         vec![vec![0.6, 0.4, 12000.0, 0.2]],
+        Some("0xYourWallet".to_string()), // required if gateway has VAULT_ADDRESS set
     )
     .await?;
 ```
@@ -104,7 +111,8 @@ pub struct VerifyResult {
 }
 ```
 
-The `attestation_hash` is the cryptographic fingerprint binding the model, input, and output together permanently. It is queryable on-chain via `InferenceVerifier.isVerified(outputHash)`.
+The `attestation_hash` is the cryptographic fingerprint binding the model, input, and output
+together permanently. It is queryable on-chain via `InferenceVerifier.isVerified(outputHash)`.
 
 **Errors:**
 
@@ -112,6 +120,7 @@ The `attestation_hash` is the cryptographic fingerprint binding the model, input
 |---|---|
 | `VeilError::Timeout` | Polling exceeded configured `timeout` |
 | `VeilError::JobFailed` | Gateway reported the job as failed |
+| `VeilError::Api { status: 402, .. }` | Insufficient VeilVault balance — deposit HSK before submitting |
 | `VeilError::Api` | Gateway returned a non-2xx HTTP response |
 | `VeilError::Http` | Network-level failure |
 
@@ -123,7 +132,19 @@ Submit a job without waiting. Returns the `job_id` immediately.
 
 ```rust
 let job_id = client
-    .submit_job("tiny_mlp_v1", vec![vec![0.1, 0.2, 0.3, 0.4]])
+    .submit_job(
+        "tiny_mlp_v1",
+        vec![vec![0.1, 0.2, 0.3, 0.4]],
+        Some("0xYourWallet".to_string()), // required if gateway has VAULT_ADDRESS set
+    )
+    .await?;
+```
+
+Pass `None` only when the gateway has no vault configured (proofs are free).
+
+```rust
+let job_id = client
+    .submit_job("tiny_mlp_v1", vec![vec![0.1, 0.2, 0.3, 0.4]], None)
     .await?;
 ```
 
@@ -145,7 +166,8 @@ let job = client.get_job(&job_id).await?;
 
 ### `get_proof` → `Proof`
 
-Fetch attestation info for a completed job. Returns `HTTP 202` (surfaced as `VeilError::Api { status: 202, .. }`) if the job is not yet complete.
+Fetch attestation info for a completed job. Returns `HTTP 202` (surfaced as
+`VeilError::Api { status: 202, .. }`) if the job is not yet complete.
 
 ```rust
 let proof = client.get_proof(&job_id).await?;
@@ -204,7 +226,13 @@ queued → running → proving → done → settled
 
 `JobStatus::is_terminal()` returns `true` for `Settled`, `Done`, and `Failed`.
 
-The `attestation_hash` is available as soon as status reaches `Proving` (~60s). You do not need to wait for full settlement to use it.
+The `attestation_hash` is available as soon as status reaches `Proving` (~60s). You do not need
+to wait for full settlement to use it.
+
+> **Fee note:** If the gateway has `VAULT_ADDRESS` configured, `wallet_address` must be
+> `Some("0x...")` and the wallet must have sufficient HSK balance in the VeilVault contract.
+> The gateway returns HTTP 402 if the balance check fails. Pass `None` only when the gateway
+> has no vault configured — proofs are then free.
 
 ---
 
@@ -215,7 +243,14 @@ All SDK errors implement `std::error::Error` and are defined in `veil_sdk::error
 ```rust
 use veil_sdk::{VeilClient, VeilError};
 
-match client.verify_inference("tiny_mlp_v1", vec![vec![0.1, 0.2, 0.3, 0.4]]).await {
+match client
+    .verify_inference(
+        "tiny_mlp_v1",
+        vec![vec![0.1, 0.2, 0.3, 0.4]],
+        Some("0xYourWallet".to_string()),
+    )
+    .await
+{
     Ok(result) => println!("settled: {:?}", result.tx_hash),
     Err(VeilError::Timeout { job_id, elapsed_ms, last_status }) => {
         eprintln!("job {job_id} timed out after {elapsed_ms}ms (last status: {last_status})");
@@ -223,6 +258,9 @@ match client.verify_inference("tiny_mlp_v1", vec![vec![0.1, 0.2, 0.3, 0.4]]).awa
     }
     Err(VeilError::JobFailed { job_id, reason }) => {
         eprintln!("job {job_id} failed: {reason:?}");
+    }
+    Err(VeilError::Api { status: 402, message }) => {
+        eprintln!("insufficient VeilVault balance — deposit HSK: {message}");
     }
     Err(VeilError::Api { status, message }) => {
         eprintln!("gateway error {status}: {message}");
@@ -237,7 +275,7 @@ match client.verify_inference("tiny_mlp_v1", vec![vec![0.1, 0.2, 0.3, 0.4]]).awa
 |---|---|---|
 | `InvalidUrl` | `String` | Base URL could not be parsed |
 | `Http` | `reqwest::Error` | Network-level failure |
-| `Api` | `status: u16, message: String` | Gateway returned non-2xx |
+| `Api` | `status: u16, message: String` | Gateway returned non-2xx — status 402 means insufficient vault balance |
 | `Timeout` | `job_id, elapsed_ms, last_status` | Polling exceeded timeout |
 | `JobFailed` | `job_id, reason: Option<String>` | Gateway reported job failed |
 
@@ -259,7 +297,11 @@ async fn main() -> veil_sdk::error::Result<()> {
 
     // Submit without blocking
     let job_id = client
-        .submit_job("polymarket_mlp_v1", vec![vec![0.6, 0.4, 12000.0, 0.2]])
+        .submit_job(
+            "polymarket_mlp_v1",
+            vec![vec![0.6, 0.4, 12000.0, 0.2]],
+            Some("0xYourWallet".to_string()),
+        )
         .await?;
 
     println!("job submitted: {job_id}");
@@ -294,9 +336,11 @@ async fn main() -> veil_sdk::error::Result<()> {
 use veil_sdk::VeilClient;
 use std::sync::Arc;
 
-let client = Arc::new(VeilClient::builder()
-    .base_url("http://localhost:8080")
-    .build()?);
+let client = Arc::new(
+    VeilClient::builder()
+        .base_url("http://localhost:8080")
+        .build()?
+);
 
 let mut handles = Vec::new();
 
@@ -306,6 +350,7 @@ for i in 0..5 {
         c.verify_inference(
             "tiny_mlp_v1",
             vec![vec![i as f64 * 0.1, 0.2, 0.3, 0.4]],
+            Some("0xYourWallet".to_string()),
         )
         .await
     }));
@@ -333,13 +378,13 @@ tracing_subscriber::fmt()
 
 ```bash
 cd sdk/Rust
-GATEWAY_URL=http://localhost:8080 cargo run --bin e2e_verify
+GATEWAY_URL=http://localhost:8080 WALLET_ADDRESS=0xYourWallet cargo run --bin e2e_verify
 ```
 
 Or as an ignored integration test:
 
 ```bash
-GATEWAY_URL=http://localhost:8080 cargo test --test e2e -- --ignored
+GATEWAY_URL=http://localhost:8080 WALLET_ADDRESS=0xYourWallet cargo test --test e2e -- --ignored
 ```
 
 ---
@@ -372,7 +417,9 @@ cast call 0x69f77055e9A6e6B34539Db2BD733f9eB07F9f11f \
   --rpc-url https://testnet.hsk.xyz
 ```
 
-The `attestation_hash` returned by the SDK is `keccak256(model_id || input_hash || output_hash)`. The `output_hash` component (`pv[64..96]`) is the on-chain lookup key stored in `InferenceVerifier.isVerified`.
+The `attestation_hash` returned by the SDK is `keccak256(model_id || input_hash || output_hash)`.
+The `output_hash` component (`pv[64..96]`) is the on-chain lookup key stored in
+`InferenceVerifier.isVerified`.
 
 ---
 
@@ -380,7 +427,7 @@ The `attestation_hash` returned by the SDK is `keccak256(model_id || input_hash 
 
 - [Mugen Gateway README](../../README.md) — full architecture, contract addresses, deployment guide
 - [TypeScript SDK](../Typescript/README.md) — `@mugen-ai/sdk` npm package
-- [Polymarket Veil Agent](../../polymarket-veil-agent/README.md) — example consumer built on this SDK
+- [Polymarket Veil Agent](https://github.com/OkoliEvans/polymarket-ai-agent/blob/main/README.md) — example consumer built on this SDK
 
 ---
 

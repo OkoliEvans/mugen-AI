@@ -37,8 +37,9 @@ To use within the monorepo as a local dependency:
 import { VeilClient } from '@mugen-ai/sdk'
 
 const client = new VeilClient({
-  gatewayUrl: 'https://your-gateway.xyz',
-  timeoutMs:  600_000,
+  gatewayUrl:    'https://your-gateway.xyz',
+  timeoutMs:     600_000,
+  walletAddress: '0xYourWallet',  // required if gateway has VAULT_ADDRESS configured
 })
 
 const job = await client.verifyInference({
@@ -64,6 +65,7 @@ console.log('Time taken:       ', job.elapsedMs, 'ms')
 | `timeoutMs` | `number` | `600000` | Max wait for job completion (ms). Use ≥600000 — SP1 proving + batch aggregation takes 2–5 min |
 | `pollIntervalMs` | `number` | `1000` | Status polling interval (ms) |
 | `maxRetries` | `number` | `3` | HTTP retry attempts on failure |
+| `walletAddress` | `string` | `undefined` | Wallet address for VeilVault fee deduction. Required when the gateway has `VAULT_ADDRESS` configured. Can be overridden per-call in `submitJob`/`verifyInference` params. |
 
 ---
 
@@ -73,8 +75,9 @@ The primary method. Submits an inference job, waits for SP1 ZK proof generation 
 
 ```typescript
 const job = await client.verifyInference({
-  modelId:   'polymarket_mlp_v1',       // registered model identifier
-  inputData: [[0.6, 0.4, 12000, 0.2]], // 2D input array matching model input shape
+  modelId:       'polymarket_mlp_v1',       // registered model identifier
+  inputData:     [[0.6, 0.4, 12000, 0.2]], // 2D input array matching model input shape
+  walletAddress: '0xYourWallet',            // overrides config-level walletAddress if set
 })
 ```
 
@@ -99,8 +102,9 @@ Submit a job without waiting. Returns the `jobId`.
 
 ```typescript
 const jobId = await client.submitJob({
-  modelId:   'tiny_mlp_v1',
-  inputData: [[0.1, 0.2, 0.3, 0.4]],
+  modelId:       'tiny_mlp_v1',
+  inputData:     [[0.1, 0.2, 0.3, 0.4]],
+  walletAddress: '0xYourWallet',  // optional — overrides config-level walletAddress
 })
 ```
 
@@ -155,12 +159,6 @@ const healthy = await client.healthCheck()
 ---
 
 ## Job Status Lifecycle
-
-```
-queued → running → proving → done → settled
-                                  ↘ failed
-```
-
 | Status | Meaning |
 |---|---|
 | `queued` | Job accepted, waiting for SP1 prover slot |
@@ -171,6 +169,12 @@ queued → running → proving → done → settled
 | `failed` | Proving or settlement failed |
 
 The `attestationHash` is returned as soon as status reaches `proving` (~60s). You do not need to wait for full settlement to use the attestation.
+
+> **Fee note:** If the gateway has `VAULT_ADDRESS` configured, `walletAddress` must be provided
+> either at client construction or per-call. The wallet must have sufficient HSK balance in the
+> VeilVault contract. The gateway returns HTTP 402 with `"insufficient VeilVault balance"` if the
+> balance check fails. If `VAULT_ADDRESS` is not set on the gateway, proofs are free and
+> `walletAddress` is ignored.
 
 ---
 
@@ -183,8 +187,9 @@ import { VeilClient, VeilError } from '@mugen-ai/sdk'
 
 try {
   await client.verifyInference({
-    modelId:   'tiny_mlp_v1',
-    inputData: [[0.1, 0.2, 0.3, 0.4]],
+    modelId:       'tiny_mlp_v1',
+    inputData:     [[0.1, 0.2, 0.3, 0.4]],
+    walletAddress: '0xYourWallet',
   })
 } catch (err) {
   if (err instanceof VeilError) {
@@ -196,7 +201,7 @@ try {
         console.error('Proof generation or settlement failed:', err.message)
         break
       case 'SUBMIT_FAILED':
-        console.error('Could not reach gateway:', err.message)
+        console.error('Could not reach gateway or insufficient vault balance:', err.message)
         break
     }
   }
@@ -207,7 +212,7 @@ try {
 
 | Code | Description |
 |---|---|
-| `SUBMIT_FAILED` | Job submission request failed |
+| `SUBMIT_FAILED` | Job submission failed — if vault is enabled and wallet has no balance, gateway returns HTTP 402 |
 | `POLL_FAILED` | Status polling request failed |
 | `JOB_FAILED` | Proof generation or on-chain settlement failed |
 | `TIMEOUT` | Job did not complete within `timeoutMs` |
@@ -223,8 +228,9 @@ try {
 ```typescript
 // Submit without blocking
 const jobId = await client.submitJob({
-  modelId:   'polymarket_mlp_v1',
-  inputData: [[0.6, 0.4, 12000, 0.2]],
+  modelId:       'polymarket_mlp_v1',
+  inputData:     [[0.6, 0.4, 12000, 0.2]],
+  walletAddress: '0xYourWallet',
 })
 
 console.log('Job submitted:', jobId)
@@ -262,7 +268,7 @@ cast call 0x69f77055e9A6e6B34539Db2BD733f9eB07F9f11f \
 
 ```bash
 cd sdk/Typescript
-GATEWAY_URL=http://localhost:8080 TIMEOUT_MS=600000 npx tsx e2e_verify.ts
+GATEWAY_URL=http://localhost:8080 WALLET_ADDRESS=0xYourWallet TIMEOUT_MS=600000 npx tsx e2e_verify.ts
 ```
 
 ---
@@ -276,7 +282,8 @@ The SDK communicates with the Mugen gateway. To run locally:
 SP1_PROVER=network cargo run -p gateway
 ```
 
-The gateway defaults to `http://0.0.0.0:8080`. Set `CLIENT_URL=http://localhost:3000` if the frontend is also running locally.
+The gateway defaults to `http://0.0.0.0:8080`. Set `CLIENT_URL=http://localhost:3000` if the
+frontend is also running locally.
 
 ---
 
@@ -323,5 +330,5 @@ sdk/Typescript/
 ## See Also
 
 - [Mugen Gateway README](../README.md) — full architecture, contract addresses, deployment guide
-- [Rust SDK](../Rust/README.md) — `mugen-sdk` Rust crate
-- [Polymarket Veil Agent](../../polymarket-veil-agent/README.md) — example consumer built on this SDK
+- [Rust SDK](../Rust/README.md) — `veil-sdk` Rust crate
+- [Polymarket Veil Agent](https://github.com/OkoliEvans/polymarket-ai-agent/blob/main/README.md) — example consumer built on this SDK

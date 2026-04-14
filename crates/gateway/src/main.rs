@@ -1362,12 +1362,12 @@ async fn main() -> std::io::Result<()> {
                 Some(Arc::new(settler::vault::VaultClient::new(cfg, addr)))
             }
             Err(e) => {
-                warn!("VEIL_VAULT_ADDRESS set but settler config missing ({e}) — fees disabled");
+                warn!("VEIL_ADDRESS set but settler config missing ({e}) — fees disabled");
                 None
             }
         },
         Err(_) => {
-            info!("VEIL_VAULT_ADDRESS not set — proofs are free");
+            info!("VEIL_ADDRESS not set — proofs are free");
             None
         }
     };

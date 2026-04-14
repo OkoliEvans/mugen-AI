@@ -67,6 +67,7 @@ async fn main() {
     let gateway_url = env_str("GATEWAY_URL", DEFAULT_GATEWAY);
     let timeout_ms = env_u64("TIMEOUT_MS", DEFAULT_TIMEOUT);
     let model_id = env_str("MODEL_ID", DEFAULT_MODEL);
+    let wallet_address = std::env::var("WALLET_ADDRESS").ok();
     let input_data: Vec<Vec<f64>> = INPUT_DATA.iter().map(|r| r.to_vec()).collect();
 
     println!("\n═══════════════════════════════════════════════");
@@ -136,7 +137,7 @@ async fn main() {
     // ── Step 1: verify_inference ──────────────────────────────────────────────
     section("Step 1 — Submit + wait (verify_inference)");
 
-    let result = match client.verify_inference(&model_id, input_data.clone()).await {
+    let result = match client.verify_inference(&model_id, input_data.clone(), wallet_address).await {
         Ok(r) => r,
         Err(e) => {
             fail!(format!("verify_inference failed: {e}"));

@@ -60,6 +60,7 @@ export class VeilClient {
   private readonly http:           AxiosInstance;
   private readonly timeoutMs:      number;
   private readonly pollIntervalMs: number;
+  private readonly walletAddress?:  string;
 
   constructor(config: VeilConfig) {
     if (!config.gatewayUrl) {
@@ -69,6 +70,7 @@ export class VeilClient {
     this.http           = createHttpClient(config.gatewayUrl, config.maxRetries ?? DEFAULT_MAX_RETRIES);
     this.timeoutMs      = config.timeoutMs      ?? DEFAULT_TIMEOUT_MS;
     this.pollIntervalMs = config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL;
+    this.walletAddress  = config.walletAddress;
   }
 
   /**
@@ -92,6 +94,7 @@ export class VeilClient {
   async verifyInference(params: {
     modelId:   string;
     inputData: number[][];
+    walletAddress?: string;
   }): Promise<VerifyResult> {
     const startMs = Date.now();
 
@@ -130,12 +133,15 @@ export class VeilClient {
   async submitJob(params: {
     modelId:   string;
     inputData: number[][];
+    walletAddress?: string;
   }): Promise<string> {
+    const wallet = params.walletAddress ?? this.walletAddress;
     return safeRequest(
       async () => {
         const { data } = await this.http.post<{ job_id: string }>('/v1/jobs', {
           model_id:   params.modelId,
           input_data: params.inputData,
+          ...(wallet ? { wallet_address: wallet } : {}),
         });
         return data.job_id;
       },

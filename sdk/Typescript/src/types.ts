@@ -76,6 +76,12 @@ export interface VeilConfig {
    * Default: 3
    */
   maxRetries?: number;
+  /**
+   * Wallet address for VeilVault fee deduction.
+   * Required when the gateway has VAULT_ADDRESS configured.
+   * Can be overridden per-call in submitJob/verifyInference params.
+   */
+  walletAddress?: string;
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────────
