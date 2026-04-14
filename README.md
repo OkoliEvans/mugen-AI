@@ -7,6 +7,8 @@
 
 Mugen generates ZK proofs of ML model inference using SP1 (Succinct's zkVM), verifies them on-chain via Groth16, and settles attestations on HashKey Chain — all from a single SDK call.
 
+> **MVP Note:** Proving is currently free. The fee mechanism (VeilVault) is deployed and functional but fee deduction is not yet enforced on inference submissions. This is intentional for the MVP phase — the full economic model will be activated in the production release.
+
 ---
 
 ## Table of Contents
@@ -14,6 +16,7 @@ Mugen generates ZK proofs of ML model inference using SP1 (Succinct's zkVM), ver
 - [Why Verifiable Inference](#why-verifiable-inference)
 - [How It Works](#how-it-works)
 - [Architecture](#architecture)
+- [Fee Mechanism](#fee-mechanism)
 - [Model Registry & IPFS](#model-registry--ipfs)
 - [Proof Aggregation](#proof-aggregation)
 - [Deployed Contracts](#deployed-contracts)
@@ -115,12 +118,69 @@ crates/
 
 contracts/evm/
 ├── src/InferenceVerifier.sol   — model registry + proof verifier + batch settlement
+├── src/VeilVault.sol           — HSK credit vault for proof fee management
 └── lib/sp1-contracts/          — SP1VerifierGateway + SP1VerifierGroth16 (v6.0.0)
 
 sdk/
 ├── Rust/       — mugen-sdk Rust crate (VeilClient, verify_inference)
 └── Typescript/ — @mugen-ai/sdk npm package (VeilClient)
 ```
+
+---
+
+## Fee Mechanism
+
+Mugen uses a pre-funded credit vault model for proof fees. The `VeilVault.sol` contract is deployed on HashKey testnet and manages HSK balances for gateway users.
+
+> **MVP status:** VeilVault is deployed and the full fee flow is implemented, but fee deduction is not enforced during the MVP phase. Proving is free. The vault contract is available for early depositors to test the deposit/withdraw flow ahead of production activation.
+
+### Fee tiers
+
+| Tier | Cost | Description |
+|---|---|---|
+| Standard | 2 HSK | Normal batch queue, settlement within 1–2 minutes |
+| Priority | 5 HSK | Priority flush, faster batch settlement |
+
+### How it works
+
+1. Users deposit HSK into `VeilVault` once — no per-transaction approval required.
+2. When a proof job is submitted, the gateway calls `VeilVault.deductFee(user, tier, jobId)` after the compressed proof is successfully submitted to the Succinct network. Failed proofs cost nothing.
+3. Users can withdraw their remaining balance at any time — funds are never locked.
+4. The gateway operator withdraws accumulated fees via `withdrawFees(treasury)`.
+
+```solidity
+// Deposit HSK to fund proofs
+VeilVault.deposit{value: 20 ether}()  // funds 10 standard proofs
+
+// Check balance
+VeilVault.balanceOf(address user) → uint256  // wei
+
+// Check if sufficient for a proof tier
+VeilVault.canProve(address user, ProofTier tier) → bool
+
+// Withdraw remaining balance
+VeilVault.withdraw(uint256 amount)
+```
+
+### Account dashboard
+
+The Mugen UI includes an account page (`/account`):
+
+- Vault balance in HSK with USD equivalent
+- Total proof count and cumulative HSK spent
+- Balance history with deposit/deduct filtering
+- Deposit and withdraw modals with proof count preview
+- Real-time proof fee display (2 HSK standard / 5 HSK priority)
+
+Connect any EVM wallet at `/account` to view your vault balance and transaction history.
+
+### Security model
+
+- Only the authorized gateway address can call `deductFee()` — enforced by the `onlyGateway` modifier
+- Reentrancy guard on all state-changing functions
+- Pausable for emergency stops
+- `Ownable2Step` — two-transaction ownership transfer prevents accidents
+- Gateway address is updatable by the owner for gateway version upgrades
 
 ---
 
@@ -182,19 +242,22 @@ BATCH_FLUSH_SECS=60     # flush timer interval
 AGG_ELF_PATH=crates/aggregator-guest/elf/aggregator-guest
 ```
 
-**Economic impact:** N inferences → 1 on-chain verification. At BATCH_SIZE=10, gas cost per inference drops by ~10x compared to individual settlement.
+**Economic impact:** N inferences → 1 on-chain verification. At BATCH_SIZE=10, gas cost per inference drops by ~10x compared to individual settlement. Combined with the VeilVault fee model, this enables sub-cent per-proof economics at scale.
 
 ---
 
 ## Deployed Contracts
 
-### HashKey Testnet
+### HashKey Testnet (Chain ID 133)
 
 | Contract | Address |
 |---|---|
 | InferenceVerifier | `0x69f77055e9A6e6B34539Db2BD733f9eB07F9f11f` |
+| VeilVault | `0x47A7EA849d500625aa424bF90a5DF4814895C279` |
 | SP1VerifierGateway | `0x0Be1C31a27F6477dd5DeB4eC4302B4cF199362CF` |
 | SP1VerifierGroth16 (v6.0.0) | `0x75e3a5461eAa204a1fce8b54De3cf572aEEA9504` |
+
+Explorer: [testnet-explorer.hsk.xyz](https://testnet-explorer.hsk.xyz)
 
 ### Registered Models
 
@@ -301,8 +364,6 @@ Poll job status.
 }
 ```
 
-Status values: `queued` → `running` → `proving` → `done` → `settled` | `failed`
-
 | Status | Meaning |
 |---|---|
 | `queued` | Job accepted, waiting for prover slot |
@@ -314,7 +375,7 @@ Status values: `queued` → `running` → `proving` → `done` → `settled` | `
 
 ### `GET /v1/jobs/:id/proof`
 
-Returns attestation info for a completed job. Individual Groth16 proofs are batched — use the batch tx_hash for on-chain lookup.
+Returns attestation info for a completed job.
 
 **Response:**
 ```json
@@ -351,6 +412,26 @@ Register a model with IPFS pinning and on-chain registration.
 }
 ```
 
+### `GET /v1/proofs`
+
+Paginated list of all settled proofs. Used by the proof explorer.
+
+```
+GET /v1/proofs?page=1&limit=20
+```
+
+### `GET /v1/proofs/:attestation_hash_or_job_id`
+
+Fetch a single proof by attestation hash or job UUID.
+
+### `GET /v1/account/:wallet`
+
+Returns vault balance, proof count, and HSK spent for a wallet address.
+
+### `GET /v1/account/:wallet/history`
+
+Paginated vault event history (deposits and deductions) for a wallet.
+
 ### `GET /healthz`
 
 ```json
@@ -383,10 +464,7 @@ sp1up --version 6.0.0
 ### 2. Build the guest ELFs
 
 ```bash
-# Inference guest
 cd crates/guest && cargo prove build --output-directory elf --elf-name inference-guest
-
-# Aggregator guest
 cd crates/aggregator-guest && cargo prove build --output-directory elf --elf-name aggregator-guest
 ```
 
@@ -401,7 +479,7 @@ DATABASE_URL=postgresql://user:pass@localhost:5432/mugen
 
 # Prover
 SP1_PROVER=network
-NETWORK_PRIVATE_KEY=0x...          # Succinct Network key
+NETWORK_PRIVATE_KEY=0x...
 GUEST_ELF_PATH=crates/guest/elf/inference-guest
 MODEL_WEIGHTS_PATH=weights/tiny_mlp.bin
 PROOFS_DIR=/tmp/mugen-proofs
@@ -416,7 +494,10 @@ BATCH_FLUSH_SECS=60
 # Settler — HashKey testnet
 SETTLER_RPC_URL=https://testnet.hsk.xyz
 SETTLER_PRIVATE_KEY=0x...
-INFERENCE_VERIFIER_ADDRESS=0x47A7EA849d500625aa424bF90a5DF4814895C279
+INFERENCE_VERIFIER_ADDRESS=0x69f77055e9A6e6B34539Db2BD733f9eB07F9f11f
+
+# VeilVault (optional — fee deduction not enforced in MVP)
+VEIL_VAULT_ADDRESS=0x47A7EA849d500625aa424bF90a5DF4814895C279
 
 # IPFS
 PINATA_JWT=eyJ...
@@ -450,22 +531,30 @@ cargo build --release -p gateway
 ./target/release/gateway
 ```
 
-### 7. Deploy contracts (fresh deployment)
+### 7. Deploy contracts
 
 ```bash
 cd contracts/evm
-
-# Deploy SP1VerifierGroth16 and register route with gateway
-forge script script/AddGroth16Route.s.sol:AddGroth16Route \
-  --rpc-url https://testnet.hsk.xyz \
-  --private-key $PRIVATE_KEY \
-  --broadcast
 
 # Deploy InferenceVerifier
 forge script script/Deploy.s.sol:Deploy \
   --rpc-url https://testnet.hsk.xyz \
   --private-key $PRIVATE_KEY \
-  --broadcast
+  --broadcast \
+  --verify \
+  --verifier blockscout \
+  --verifier-url https://testnet-explorer.hsk.xyz/api
+
+# Deploy VeilVault
+GATEWAY_WALLET_ADDRESS=$(cast wallet address --private-key $PRIVATE_KEY) \
+OWNER_ADDRESS=<your-address> \
+forge script script/DeployVault.s.sol:DeployVault \
+  --rpc-url https://testnet.hsk.xyz \
+  --private-key $PRIVATE_KEY \
+  --broadcast \
+  --verify \
+  --verifier blockscout \
+  --verifier-url https://testnet-explorer.hsk.xyz/api
 ```
 
 ### 8. Pre-flight checklist
@@ -473,7 +562,6 @@ forge script script/Deploy.s.sol:Deploy \
 ```bash
 # Confirm vkey matches current ELF
 cargo prove vkey --elf crates/guest/elf/inference-guest
-# Must match inferenceVKey on contract:
 cast call $INFERENCE_VERIFIER_ADDRESS "inferenceVKey()(bytes32)" --rpc-url https://testnet.hsk.xyz
 
 # Confirm settler is whitelisted
@@ -483,6 +571,9 @@ cast call $INFERENCE_VERIFIER_ADDRESS "isSettler(address)(bool)" $SETTLER_ADDRES
 cast call $INFERENCE_VERIFIER_ADDRESS "isRegisteredModel(bytes32)(bool)" \
   0x91db243a5b7956c0818e930c6abde3a47b14dd47a71928367409535f04aa32ed \
   --rpc-url https://testnet.hsk.xyz
+
+# Confirm VeilVault gateway is set correctly
+cast call $VEIL_VAULT_ADDRESS "gateway()(address)" --rpc-url https://testnet.hsk.xyz
 ```
 
 ---

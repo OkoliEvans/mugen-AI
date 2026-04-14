@@ -4,7 +4,11 @@ use std::sync::Arc;
 
 use actix_cors::Cors;
 use actix_web::{
-    App, HttpResponse, HttpServer, Responder, get, http::header, post, web::{Data, Json, Path, Query}
+    get,
+    http::header,
+    post,
+    web::{Data, Json, Path, Query},
+    App, HttpResponse, HttpServer, Responder,
 };
 use chrono::Utc;
 use common::{
@@ -876,38 +880,32 @@ async fn submit_job(state: Data<AppState>, Json(req): Json<SubmitRequest>) -> im
     }
 
     // ── VeilVault balance check ───────────────────────────────────────────────
-    if let Some(vault) = &state.vault {
-        match &req.wallet_address {
-            None => {
-                return HttpResponse::BadRequest().json(err(
-                    "wallet_address is required when VeilVault fee collection is enabled",
-                ));
-            }
-            Some(wallet) => {
-                match vault
-                    .check_balance(wallet, settler::vault::ProofTier::Standard)
+    if let (Some(vault), Some(wallet)) = (&state.vault, &req.wallet_address) {
+        match vault
+            .check_balance(wallet, settler::vault::ProofTier::Standard)
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                let balance = vault
+                    .balance_of(wallet)
                     .await
-                {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        let balance = vault
-                            .balance_of(wallet)
-                            .await
-                            .map(|b| b.to_string())
-                            .unwrap_or_else(|_| "0".into());
-                        return HttpResponse::PaymentRequired().json(serde_json::json!({
-                            "error":    "insufficient VeilVault balance",
-                            "required": "2000000000000000000",
-                            "balance":  balance,
-                            "hint":     "deposit HSK via VeilVault.deposit{value: N ether}()"
-                        }));
-                    }
-                    Err(e) => {
-                        warn!("vault balance check failed for {wallet}: {e} — allowing job");
-                    }
-                }
+                    .map(|b| b.to_string())
+                    .unwrap_or_else(|_| "0".into());
+                return HttpResponse::PaymentRequired().json(serde_json::json!({
+                    "error":    "insufficient VeilVault balance",
+                    "required": "2000000000000000000",
+                    "balance":  balance,
+                    "hint":     "deposit HSK via VeilVault.deposit{value: N ether}()"
+                }));
+            }
+            Err(e) => {
+                warn!("vault balance check failed for {wallet}: {e} — allowing job");
             }
         }
+    }
+    if state.vault.is_some() && req.wallet_address.is_none() {
+        warn!("vault enabled but no wallet_address in request — fee deduction skipped");
     }
 
     let model_name = req.model_id.clone();

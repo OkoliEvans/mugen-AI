@@ -35,6 +35,17 @@ sol!(
         },
         {
             "type": "function",
+            "name": "submitAggregatedProof",
+            "inputs": [
+                { "name": "proofBytes",   "type": "bytes",     "internalType": "bytes"     },
+                { "name": "publicValues", "type": "bytes",     "internalType": "bytes"     },
+                { "name": "outputHashes", "type": "bytes32[]", "internalType": "bytes32[]" }
+            ],
+            "outputs": [],
+            "stateMutability": "nonpayable"
+        },
+        {
+            "type": "function",
             "name": "registerModel",
             "inputs": [
                 { "name": "modelId",        "type": "bytes32", "internalType": "bytes32" },
@@ -72,6 +83,17 @@ sol!(
             "name": "isRegisteredModel",
             "inputs": [
                 { "name": "modelId", "type": "bytes32", "internalType": "bytes32" }
+            ],
+            "outputs": [
+                { "name": "", "type": "bool", "internalType": "bool" }
+            ],
+            "stateMutability": "view"
+        },
+        {
+            "type": "function",
+            "name": "isBatchSettled",
+            "inputs": [
+                { "name": "", "type": "bytes32", "internalType": "bytes32" }
             ],
             "outputs": [
                 { "name": "", "type": "bool", "internalType": "bool" }
@@ -262,12 +284,100 @@ impl Settler {
 
     pub async fn submit_aggregated(
         &self,
-        _proof_path: &str,
-        _output_hashes: &[[u8; 32]],
+        proof_path: &str,
+        output_hashes: &[[u8; 32]],
     ) -> Result<String, SettlerError> {
-        Err(SettlerError::ConfigError(
-            "aggregated settlement is not implemented in Settler yet".to_string(),
-        ))
+        info!("submitting aggregated proof to InferenceVerifier");
+
+        // ── Read proof file ─────────────────────────────────────────────
+        let proof_bytes = tokio::fs::read(proof_path).await.map_err(|e| {
+            SettlerError::ConfigError(format!("proof file not found at {proof_path}: {e}"))
+        })?;
+
+        let proof: sp1_sdk::SP1ProofWithPublicValues = bincode::deserialize(&proof_bytes)
+            .map_err(|e| SettlerError::ConfigError(format!("failed to deserialize proof: {e}")))?;
+
+        let raw_proof: Bytes = proof.bytes().into();
+        let public_values: Bytes = proof.public_values.to_vec().into();
+
+        // ── Convert output hashes ───────────────────────────────────────
+        let hashes: Vec<FixedBytes<32>> =
+            output_hashes.iter().map(|h| FixedBytes::from(*h)).collect();
+
+        // ── Provider + contract ─────────────────────────────────────────
+        let provider = self.build_provider().await?;
+        let address = Address::from_str(&self.config.contract_address)
+            .map_err(|e| SettlerError::InvalidAddress(e.to_string()))?;
+        let contract = InferenceVerifier::new(address, &provider);
+
+        // ── Extract merkle root (first 32 bytes) ────────────────────────
+        if public_values.len() != 36 {
+            return Err(SettlerError::ConfigError(format!(
+                "invalid publicValues length: expected 36, got {}",
+                public_values.len()
+            )));
+        }
+
+        let merkle_root: FixedBytes<32> = FixedBytes::from_slice(&public_values[0..32]);
+
+        // ── Check already settled ───────────────────────────────────────
+        // (optional but good parity with single submit)
+        // NOTE: assumes you have isBatchSettled exposed; if not, skip
+        // let already = contract.isBatchSettled(merkle_root).call().await?;
+        // if already { return Ok("already-settled".into()); }
+
+        info!(
+            merkle_root = %hex::encode(merkle_root),
+            batch_size  = hashes.len(),
+            proof_len   = raw_proof.len(),
+            "calling submitAggregatedProof"
+        );
+
+        // ── Check already settled ───────────────────────────────────────
+        let already = contract
+            .isBatchSettled(merkle_root)
+            .call()
+            .await
+            .map_err(|e| SettlerError::RpcError(e.to_string()))?;
+
+        if already {
+            warn!(
+                merkle_root = %hex::encode(merkle_root),
+                "batch already settled — skipping"
+            );
+            return Ok("already-settled".to_string());
+        }
+
+        // ── Send tx ─────────────────────────────────────────────────────
+        let tx = contract
+            .submitAggregatedProof(raw_proof, public_values, hashes)
+            .send()
+            .await
+            .map_err(|e| SettlerError::RpcError(e.to_string()))?;
+
+        let tx_hash = *tx.tx_hash();
+        info!(%tx_hash, "aggregated tx submitted — waiting");
+
+        let receipt = tokio::time::timeout(
+            Duration::from_secs(self.config.tx_timeout_secs),
+            tx.get_receipt(),
+        )
+        .await
+        .map_err(|_| SettlerError::TxTimeout(self.config.tx_timeout_secs))?
+        .map_err(|e| SettlerError::RpcError(e.to_string()))?;
+
+        if !receipt.status() {
+            return Err(SettlerError::TxReverted(format!("{tx_hash}")));
+        }
+
+        info!(
+            tx_hash      = %tx_hash,
+            block_number = ?receipt.block_number,
+            gas_used     = receipt.gas_used,
+            "aggregated proof settled ✓"
+        );
+
+        Ok(format!("{tx_hash:#x}"))
     }
 
     // ── Private ───────────────────────────────────────────────────────────────
