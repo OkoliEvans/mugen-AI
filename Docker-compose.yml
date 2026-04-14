@@ -1,23 +1,47 @@
-version: '3.9'
-
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: elenxis-postgres
+  db:
+    image: postgres:16
+    container_name: mugen-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER:     elenxis
-      POSTGRES_PASSWORD: elenxis_dev
-      POSTGRES_DB:       elenxis
+      POSTGRES_USER: evans
+      POSTGRES_PASSWORD: 2242
+      POSTGRES_DB: elenxis
     ports:
       - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U elenxis"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+      - mugen_pg:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    container_name: mugen-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  gateway:
+    build: .
+    container_name: mugen-gateway
+    restart: unless-stopped
+    depends_on:
+      - db
+      - redis
+    ports:
+      - "8080:8080"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+
+      # DB (IMPORTANT: use service name, NOT localhost)
+      DATABASE_URL: postgres://evans:2242@db:5432/elenxis
+
+      # Redis
+      REDIS_URL: redis://redis:6379
+
+      # SP1
+      AGG_ELF_PATH: /app/crates/aggregator-guest/elf/aggregator-guest
+      GUEST_ELF_PATH: /app/crates/guest/elf/inference-guest
+      SP1_PROVER: network
 
 volumes:
-  postgres_data:
+  mugen_pg:
