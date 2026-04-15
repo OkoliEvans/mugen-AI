@@ -47,9 +47,9 @@ RUN apt-get update && apt-get install -y \
 # Gateway binary
 COPY --from=builder /app/target/release/gateway /app/gateway
 
-# 🔥 CRITICAL: copy prebuilt SP1 ELF artifacts from source context
 COPY crates/aggregator-guest/elf /app/elf/aggregator
 COPY crates/guest/elf /app/elf/guest
+COPY weights /app/weights
 
 # Runtime env
 ENV HOST=0.0.0.0
